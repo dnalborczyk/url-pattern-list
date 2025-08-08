@@ -493,12 +493,9 @@ export class URLPatternList<T> {
     // If we've consumed the entire path, try patterns that end at this node
     if (pathIndex >= path.length) {
       for (const item of node.patterns) {
-        // Final validation with URLPattern to ensure correctness
-        if (item.pattern.test(path, baseUrl)) {
-          const result = item.pattern.exec(path, baseUrl);
-          if (result !== null) {
-            return {result, value: item.value};
-          }
+        const result = item.pattern.exec(path, baseUrl);
+        if (result !== null) {
+          return {result, value: item.value};
         }
       }
       return null;
