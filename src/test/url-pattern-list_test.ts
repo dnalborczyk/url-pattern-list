@@ -628,6 +628,103 @@ suite('URLPatternList implementations', () => {
           'should not match non-user/admin paths',
         );
       });
+
+      test('handles OneOrMore wildcard modifiers to match URLPattern semantics exactly', () => {
+        const list = impl.create<string>();
+
+        // Test case 1: OneOrMore wildcard with path separator
+        // URLPattern considers /api/*+ to match /api/ (capturing empty string)
+        list.addPattern(new URLPattern({pathname: '/api/*+'}), 'api-oneormore');
+
+        let match = list.match('/api/', 'http://example.com');
+        assert.ok(match, 'should match /api/ with OneOrMore wildcard');
+        assert.strictEqual(match?.value, 'api-oneormore');
+
+        match = list.match('/api/something', 'http://example.com');
+        assert.ok(match, 'should match /api/something with OneOrMore wildcard');
+        assert.strictEqual(match?.value, 'api-oneormore');
+
+        // Test case 2: OneOrMore wildcard without path separator
+        const list2 = impl.create<string>();
+        list2.addPattern(
+          new URLPattern({pathname: '/test*+'}),
+          'test-oneormore',
+        );
+
+        // Verify direct URLPattern behavior first
+        const directPattern = new URLPattern({pathname: '/test*+'});
+        const directResult = directPattern.exec('/test', 'http://example.com');
+        assert.ok(
+          directResult,
+          'URLPattern should match /test*+ against /test',
+        );
+
+        // Our implementation should match URLPattern behavior
+        match = list2.match('/test', 'http://example.com');
+        assert.ok(
+          match,
+          'should match /test with OneOrMore wildcard to match URLPattern semantics',
+        );
+        assert.strictEqual(match?.value, 'test-oneormore');
+
+        match = list2.match('/testcontent', 'http://example.com');
+        assert.ok(match, 'should match /testcontent with OneOrMore wildcard');
+        assert.strictEqual(match?.value, 'test-oneormore');
+      });
+
+      test('handles zero-consumption patterns correctly', () => {
+        const list = impl.create<string>();
+
+        // Test patterns that can match with zero consumption
+        list.addPattern(
+          new URLPattern({pathname: '/path/:optional?'}),
+          'optional-param',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/path/:zeroOrMore*'}),
+          'zero-or-more',
+        );
+
+        // These should match even when the optional/zero-or-more parts consume nothing
+        let match = list.match('/path', 'http://example.com');
+        assert.ok(
+          match,
+          'should match pattern with optional parameter consuming nothing',
+        );
+
+        // Test precedence - first pattern should win
+        assert.strictEqual(
+          match?.value,
+          'optional-param',
+          'first pattern should match',
+        );
+      });
+
+      test('eliminates redundant FullWildcard matching loops', () => {
+        const list = impl.create<string>();
+
+        // Add patterns that would trigger both loops in the old implementation
+        list.addPattern(
+          new URLPattern({pathname: '/api/users/:id'}),
+          'specific',
+        );
+        list.addPattern(new URLPattern({pathname: '/api/*'}), 'wildcard');
+
+        // Specific pattern should win due to first-match-wins semantics
+        let match = list.match('/api/users/123', 'http://example.com');
+        assert.ok(match, 'should match specific pattern');
+        assert.strictEqual(match?.value, 'specific');
+
+        // Wildcard should match other paths
+        match = list.match('/api/other/path', 'http://example.com');
+        assert.ok(match, 'should match wildcard pattern');
+        assert.strictEqual(match?.value, 'wildcard');
+
+        // Test edge case: wildcard at path boundary
+        match = list.match('/api/', 'http://example.com');
+        assert.ok(match, 'should match wildcard at path boundary');
+        assert.strictEqual(match?.value, 'wildcard');
+      });
     });
   }
 });

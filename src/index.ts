@@ -248,16 +248,9 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
 
   tryMatchAtPosition(path: string, pathIndex: number): number {
     const remaining = path.length - pathIndex;
-
-    switch (this.modifier) {
-      case Modifier.OneOrMore:
-        return remaining > 0 ? remaining : 0;
-      case Modifier.Optional:
-      case Modifier.ZeroOrMore:
-      case Modifier.None:
-      default:
-        return remaining;
-    }
+    // Always return remaining characters to match URLPattern semantics exactly.
+    // URLPattern handles all modifier validation, so we defer to pattern.exec().
+    return remaining;
   }
 }
 
@@ -403,11 +396,12 @@ export class URLPatternList<T> {
 
     const part = parts[partIndex];
 
-    // Special handling for ZeroOrMore (*) and Optional (?) modifiers
+    // Special handling for ZeroOrMore (*), Optional (?), and OneOrMore (*+) modifiers
     // These patterns can match here (consuming zero instances) OR continue matching
     if (
       part.modifier === Modifier.ZeroOrMore ||
-      part.modifier === Modifier.Optional
+      part.modifier === Modifier.Optional ||
+      part.modifier === Modifier.OneOrMore
     ) {
       // For zero-match case, skip this part and add the remaining pattern from the next part
       this.#addPatternToTree(currentNode, parts, partIndex + 1, item);
@@ -504,33 +498,14 @@ export class URLPatternList<T> {
     // Try each child node to see if it can match from the current position
     for (const childNode of node.children) {
       const consumedChars = childNode.tryMatchAtPosition(path, pathIndex);
-      if (consumedChars > 0) {
-        const match = this.#matchInTreeWithPath(
-          path,
-          pathIndex + consumedChars,
-          baseUrl,
-          childNode,
-        );
-        if (match) {
-          return match;
-        }
-      }
-    }
-
-    // Special handling for full wildcard - it can consume all remaining
-    // characters
-    for (const childNode of node.children) {
-      if (childNode instanceof FullWildcardPrefixTreeNode) {
-        // Full wildcard consumes everything remaining
-        const match = this.#matchInTreeWithPath(
-          path,
-          path.length,
-          baseUrl,
-          childNode,
-        );
-        if (match) {
-          return match;
-        }
+      const match = this.#matchInTreeWithPath(
+        path,
+        pathIndex + consumedChars,
+        baseUrl,
+        childNode,
+      );
+      if (match) {
+        return match;
       }
     }
 
