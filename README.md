@@ -121,8 +121,8 @@ This library requires
 support:
 
 - Chrome 95+
-- Firefox 106+
-- Safari 17.0+
+- Firefox 142+ (Preview support)
+- Safari 26.0+ (Preview support)
 
 For older browsers, you can use a [URLPattern
 polyfill](https://github.com/kenchris/urlpattern-polyfill).
