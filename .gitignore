@@ -1,0 +1,12 @@
+/node_modules
+/.wireit
+/.tsbuildinfo
+
+/benchmark
+/lib
+/test
+
+/index.js
+/index.js.map
+/index.d.ts
+/index.d.ts.map

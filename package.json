@@ -1,0 +1,67 @@
+{
+  "name": "url-pattern-list",
+  "version": "0.0.0",
+  "description": "Efficiently match URLs against a collection of URL patterns",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "build": "wireit",
+    "test": "wireit",
+    "benchmark": "wireit",
+    "format": "npm run format:fix",
+    "format:check": "prettier \"**/*.{cjs,html,js,json,md,ts}\" --check",
+    "format:fix": "prettier \"**/*.{cjs,html,js,json,md,ts}\" --write"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/justinfagnani/url-pattern-list.git"
+  },
+  "keywords": [
+    "url",
+    "urlpattern",
+    "url-pattern"
+  ],
+  "author": "Justin Fagnani <justin@fagnani.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/justinfagnani/url-pattern-list/issues"
+  },
+  "homepage": "https://github.com/justinfagnani/url-pattern-list#readme",
+  "devDependencies": {
+    "@types/node": "^24.2.0",
+    "prettier": "^3.6.2",
+    "prettier-plugin-curly": "^0.3.2",
+    "typescript": "^5.9.2",
+    "wireit": "^0.14.12"
+  },
+  "wireit": {
+    "build": {
+      "command": "tsc --build",
+      "files": [
+        "tsconfig.json",
+        "src/**/*.ts"
+      ],
+      "outputs": [
+        "index.{js,d.ts,js.map,d.ts.map}",
+        "lib"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "test": {
+      "command": "node --enable-source-maps --test --test-reporter=spec \"test/**/*_test.js\"",
+      "dependencies": [
+        "build"
+      ],
+      "files": [],
+      "output": []
+    },
+    "benchmark": {
+      "command": "node --enable-source-maps benchmark/benchmark.js",
+      "dependencies": [
+        "build"
+      ],
+      "files": [],
+      "output": []
+    }
+  }
+}
