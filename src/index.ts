@@ -11,11 +11,6 @@ export interface URLPatternListMatch<T> {
   value: T;
 }
 
-interface InternalMatch<T> {
-  result: URLPatternResult;
-  item: URLPatternListItem<T>;
-}
-
 /**
  * Base class for prefix tree nodes. Each node type corresponds to a URL pattern
  * part type.
@@ -51,7 +46,7 @@ export abstract class PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null;
+  ): URLPatternListItem<T> | null;
 
   /**
    * Try patterns that end at this node, then try matching children.
@@ -61,15 +56,15 @@ export abstract class PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
-    let bestMatch: InternalMatch<T> | null = null;
+  ): URLPatternListItem<T> | null {
+    let bestMatch: URLPatternListItem<T> | null = null;
     // First, try patterns that end at this node (only if we've consumed the
     // entire path)
     if (pathIndex >= path.length) {
       for (const item of this.patterns) {
-        const result = item.pattern.exec(path, baseUrl);
-        if (result !== null) {
-          bestMatch = {result, item};
+        const matches = item.pattern.test(path, baseUrl);
+        if (matches === true) {
+          bestMatch = item;
           break;
         }
       }
@@ -77,16 +72,13 @@ export abstract class PrefixTreeNode<T> {
 
     // Then try each child node to see if it can match from the current position
     for (const childNode of this.children) {
-      if (
-        bestMatch !== null &&
-        childNode.maxSequence < bestMatch.item.sequence
-      ) {
+      if (bestMatch !== null && childNode.maxSequence < bestMatch.sequence) {
         continue;
       }
       const newMatch = childNode.match(path, pathIndex, baseUrl);
       if (
         newMatch !== null &&
-        (bestMatch === null || newMatch.item.sequence < bestMatch.item.sequence)
+        (bestMatch === null || newMatch.sequence < bestMatch.sequence)
       ) {
         bestMatch = newMatch;
       }
@@ -110,7 +102,7 @@ export class RootPrefixTreeNode<T> extends PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
+  ): URLPatternListItem<T> | null {
     return this.tryPatternsAndChildren(path, pathIndex, baseUrl);
   }
 }
@@ -142,7 +134,7 @@ export class FixedPrefixTreeNode<T> extends PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
+  ): URLPatternListItem<T> | null {
     const expectedText = this.value;
 
     // Handle OneOrMore and ZeroOrMore modifiers
@@ -230,7 +222,7 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
+  ): URLPatternListItem<T> | null {
     // Handle ZeroOrMore modifier with children using backtracking
     if (this.modifier === Modifier.ZeroOrMore && this.children.length > 0) {
       const remaining = path.slice(pathIndex);
@@ -615,7 +607,7 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
+  ): URLPatternListItem<T> | null {
     // For modifiers that support zero-match, try zero consumption first
     if (
       this.modifier === Modifier.ZeroOrMore ||
@@ -684,7 +676,7 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
     path: string,
     pathIndex: number,
     baseUrl: string | undefined,
-  ): InternalMatch<T> | null {
+  ): URLPatternListItem<T> | null {
     const remaining = path.slice(pathIndex);
 
     if (remaining.length === 0) {
@@ -885,9 +877,13 @@ export class URLPatternList<T> {
   match(path: string, baseUrl?: string): URLPatternListMatch<T> | null {
     const match = this.#root.match(path, 0, baseUrl);
     if (match !== null) {
+      const result = match.pattern.exec(path, baseUrl);
+      if (result === null) {
+        throw new Error('Pattern execution failed');
+      }
       return {
-        result: match.result,
-        value: match.item.value,
+        result,
+        value: match.value,
       };
     }
     return null;
