@@ -61,6 +61,7 @@ for small (10) sets of patterns, and up to 25-30x faster for large (2000) sets
 of patterns.
 
 To run the benchmark on your machine:
+
 ```sh
 npm run benchmark
 ```

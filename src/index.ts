@@ -1,13 +1,19 @@
-import {parse, PartType, Modifier} from './lib/parse-pattern.js';
+import {parse, type Part, PartType, Modifier} from './lib/parse-pattern.js';
 
 export interface URLPatternListItem<T> {
-  pattern: URLPattern;
-  value: T;
+  readonly sequence: number;
+  readonly pattern: URLPattern;
+  readonly value: T;
 }
 
 export interface URLPatternListMatch<T> {
   result: URLPatternResult;
   value: T;
+}
+
+interface InternalMatch<T> {
+  result: URLPatternResult;
+  item: URLPatternListItem<T>;
 }
 
 /**
@@ -18,25 +24,76 @@ export interface URLPatternListMatch<T> {
  */
 export abstract class PrefixTreeNode<T> {
   /**
+   * Maximum sequence number for this node.
+   */
+  maxSequence: number = Number.MAX_SAFE_INTEGER;
+
+  /**
    * Patterns that end at this node (for exact matches)
    */
-  readonly patterns: URLPatternListItem<T>[] = [];
+  readonly patterns: Array<URLPatternListItem<T>> = [];
 
   /**
    * Child nodes stored as an array for iteration.
    */
-  readonly children: PrefixTreeNode<T>[] = [];
+  readonly children: Array<PrefixTreeNode<T>> = [];
 
   /**
-   * Check if this node can match the given part type and modifiers.
+   * Check if this tree node can match the given parsed pattern part.
    */
-  abstract canMatch(part: ReturnType<typeof parse>[0]): boolean;
+  abstract matchesPart(part: Part): boolean;
 
   /**
-   * Try to match this node at the given position in the path.
-   * Returns the number of characters consumed, or 0 if no match.
+   * Match a path starting from this node, recursively checking children.
+   * Returns the first successful match found.
    */
-  abstract tryMatchAtPosition(path: string, pathIndex: number): number;
+  abstract match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null;
+
+  /**
+   * Try patterns that end at this node, then try matching children.
+   * Returns the first successful match found.
+   */
+  protected tryPatternsAndChildren(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
+    let bestMatch: InternalMatch<T> | null = null;
+    // First, try patterns that end at this node (only if we've consumed the
+    // entire path)
+    if (pathIndex >= path.length) {
+      for (const item of this.patterns) {
+        const result = item.pattern.exec(path, baseUrl);
+        if (result !== null) {
+          bestMatch = {result, item};
+          break;
+        }
+      }
+    }
+
+    // Then try each child node to see if it can match from the current position
+    for (const childNode of this.children) {
+      if (
+        bestMatch !== null &&
+        childNode.maxSequence < bestMatch.item.sequence
+      ) {
+        continue;
+      }
+      const newMatch = childNode.match(path, pathIndex, baseUrl);
+      if (
+        newMatch !== null &&
+        (bestMatch === null || newMatch.item.sequence < bestMatch.item.sequence)
+      ) {
+        bestMatch = newMatch;
+      }
+    }
+
+    return bestMatch;
+  }
 }
 
 /**
@@ -45,12 +102,16 @@ export abstract class PrefixTreeNode<T> {
  * @internal
  */
 export class RootPrefixTreeNode<T> extends PrefixTreeNode<T> {
-  canMatch(): boolean {
+  matchesPart(): boolean {
     return true; // Root can match anything
   }
 
-  tryMatchAtPosition(): number {
-    return 0; // Root consumes no characters
+  match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
+    return this.tryPatternsAndChildren(path, pathIndex, baseUrl);
   }
 }
 
@@ -61,21 +122,76 @@ export class RootPrefixTreeNode<T> extends PrefixTreeNode<T> {
  */
 export class FixedPrefixTreeNode<T> extends PrefixTreeNode<T> {
   readonly value: string;
+  readonly modifier: Modifier;
 
-  constructor(value: string) {
+  constructor(value: string, modifier: Modifier = Modifier.None) {
     super();
     this.value = value;
+    this.modifier = modifier;
   }
 
-  canMatch(part: ReturnType<typeof parse>[0]): boolean {
-    return part.type === PartType.Fixed && part.value === this.value;
+  matchesPart(part: Part): boolean {
+    return (
+      part.type === PartType.Fixed &&
+      part.value === this.value &&
+      part.modifier === this.modifier
+    );
   }
 
-  tryMatchAtPosition(path: string, pathIndex: number): number {
-    if (path.slice(pathIndex).startsWith(this.value)) {
-      return this.value.length;
+  match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
+    const expectedText = this.value;
+
+    // Handle OneOrMore and ZeroOrMore modifiers
+    if (
+      this.modifier === Modifier.OneOrMore ||
+      this.modifier === Modifier.ZeroOrMore
+    ) {
+      let consumedLength = 0;
+      let currentIndex = pathIndex;
+      let matchCount = 0;
+
+      // Keep matching the expectedText as many times as possible
+      while (path.startsWith(expectedText, currentIndex)) {
+        consumedLength += expectedText.length;
+        currentIndex += expectedText.length;
+        matchCount++;
+      }
+
+      // OneOrMore requires at least one match, ZeroOrMore allows zero
+      const minimumMatches = this.modifier === Modifier.OneOrMore ? 1 : 0;
+      if (matchCount >= minimumMatches) {
+        return this.tryPatternsAndChildren(
+          path,
+          pathIndex + consumedLength,
+          baseUrl,
+        );
+      }
+
+      return null;
     }
-    return 0;
+
+    // Check if the expected text is present at the current position
+    if (path.startsWith(expectedText, pathIndex)) {
+      // Expected text is present - consume it and continue
+      return this.tryPatternsAndChildren(
+        path,
+        pathIndex + expectedText.length,
+        baseUrl,
+      );
+    }
+
+    // Expected text is not present - check if this is optional
+    if (this.modifier === Modifier.Optional) {
+      // Optional part not present - skip it and continue
+      return this.tryPatternsAndChildren(path, pathIndex, baseUrl);
+    }
+
+    // Required part not present - no match
+    return null;
   }
 }
 
@@ -101,7 +217,7 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     this.suffix = suffix;
   }
 
-  canMatch(part: ReturnType<typeof parse>[0]): boolean {
+  matchesPart(part: Part): boolean {
     return (
       part.type === PartType.SegmentWildcard &&
       part.modifier === this.modifier &&
@@ -110,21 +226,219 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     );
   }
 
-  tryMatchAtPosition(path: string, pathIndex: number): number {
+  match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
+    // Handle ZeroOrMore modifier with children using backtracking
+    if (this.modifier === Modifier.ZeroOrMore && this.children.length > 0) {
+      const remaining = path.slice(pathIndex);
+
+      // First try zero consumption (ZeroOrMore allows consuming nothing)
+      const zeroMatch = this.tryPatternsAndChildren(path, pathIndex, baseUrl);
+      if (zeroMatch !== null) {
+        return zeroMatch;
+      }
+
+      // Then try consuming different amounts, from most to least
+      // This allows children to match whatever remains
+      if (remaining.length > 0 && remaining.startsWith('/')) {
+        const segments = remaining.split('/').slice(1); // Remove empty first element
+
+        // Try consuming 1, 2, 3, ... segments
+        for (
+          let segmentCount = 1;
+          segmentCount <= segments.length;
+          segmentCount++
+        ) {
+          let consumedLength = 1; // leading slash
+          for (let i = 0; i < segmentCount; i++) {
+            consumedLength += segments[i].length;
+            if (i < segmentCount - 1) {
+              consumedLength += 1; // slash between segments
+            }
+          }
+
+          const newPathIndex = pathIndex + consumedLength;
+          const match = this.tryPatternsAndChildren(
+            path,
+            newPathIndex,
+            baseUrl,
+          );
+          if (match !== null) {
+            return match;
+          }
+        }
+      }
+
+      return null;
+    }
+
+    // Handle OneOrMore modifier with children using backtracking
+    if (this.modifier === Modifier.OneOrMore && this.children.length > 0) {
+      const remaining = path.slice(pathIndex);
+
+      // OneOrMore requires at least one segment, so don't try zero consumption
+      // Try consuming different amounts, from 1 segment to all segments
+      if (remaining.length > 0 && remaining.startsWith('/')) {
+        const segments = remaining.split('/').slice(1); // Remove empty first element
+
+        // Try consuming 1, 2, 3, ... segments
+        for (
+          let segmentCount = 1;
+          segmentCount <= segments.length;
+          segmentCount++
+        ) {
+          let consumedLength = 1; // leading slash
+          for (let i = 0; i < segmentCount; i++) {
+            consumedLength += segments[i].length;
+            if (i < segmentCount - 1) {
+              consumedLength += 1; // slash between segments
+            }
+          }
+
+          const newPathIndex = pathIndex + consumedLength;
+          const match = this.tryPatternsAndChildren(
+            path,
+            newPathIndex,
+            baseUrl,
+          );
+          if (match !== null) {
+            return match;
+          }
+        }
+      }
+
+      return null;
+    }
+
+    // Handle Modifier.None with backtracking when we have children
+    if (this.modifier === Modifier.None && this.children.length > 0) {
+      const remaining = path.slice(pathIndex);
+
+      // For wildcards with prefix/suffix, we need to be more careful about backtracking
+      if (this.prefix || this.suffix) {
+        // For prefix-based wildcards, try character-by-character consumption
+        // to allow subsequent Fixed parts to match
+        if (!remaining.startsWith(this.prefix)) {
+          return null;
+        }
+
+        const afterPrefix = remaining.slice(this.prefix.length);
+        if (afterPrefix.length === 0) {
+          return null; // Must have content after prefix
+        }
+
+        // Try different consumption amounts, from minimal to maximal
+        for (
+          let contentLength = 1;
+          contentLength <= afterPrefix.length;
+          contentLength++
+        ) {
+          const consumption = this.prefix.length + contentLength;
+          const newPathIndex = pathIndex + consumption;
+          const match = this.tryPatternsAndChildren(
+            path,
+            newPathIndex,
+            baseUrl,
+          );
+          if (match !== null) {
+            return match;
+          }
+        }
+
+        return null;
+      } else {
+        // For wildcards without prefix/suffix, use character-by-character backtracking
+        // This handles cases like :slug in /posts/:id-:slug-:category
+        if (remaining.length === 0) {
+          return null;
+        }
+
+        // Try different consumption amounts, from minimal to maximal
+        for (
+          let contentLength = 1;
+          contentLength <= remaining.length;
+          contentLength++
+        ) {
+          const newPathIndex = pathIndex + contentLength;
+          const match = this.tryPatternsAndChildren(
+            path,
+            newPathIndex,
+            baseUrl,
+          );
+          if (match !== null) {
+            return match;
+          }
+        }
+
+        return null;
+      }
+    }
+
+    // For other cases, use the original logic
     const remaining = path.slice(pathIndex);
+    let consumedChars: number;
 
     switch (this.modifier) {
       case Modifier.None:
-        return this.#matchSingleSegment(remaining);
+        consumedChars = this.#matchSingleSegment(remaining);
+        break;
       case Modifier.ZeroOrMore:
-        return this.#matchMultipleSegments(remaining, false);
+        // Already handled above if we have children
+        if (this.prefix && this.prefix !== '/') {
+          // Custom prefix (like '-' in group delimiters) - use prefix-based matching
+          consumedChars = this.#matchWithPrefixSuffix(remaining, false);
+        } else {
+          // Standard '/' prefix or no prefix - use traditional multi-segment matching
+          consumedChars = this.#matchMultipleSegments(remaining, false);
+        }
+        break;
       case Modifier.OneOrMore:
-        return this.#matchMultipleSegments(remaining, true);
+        if (this.prefix && this.prefix !== '/') {
+          // Custom prefix (like '-' in group delimiters) - use prefix-based matching
+          consumedChars = this.#matchOneOrMoreWithPrefix(remaining);
+        } else {
+          // Standard '/' prefix or no prefix - use traditional multi-segment matching
+          consumedChars = this.#matchMultipleSegments(remaining, true);
+        }
+        break;
       case Modifier.Optional:
-        return this.#matchOptionalSegment(remaining);
+        consumedChars = this.#matchOptionalSegment(remaining);
+        break;
       default:
-        return 0;
+        consumedChars = 0;
     }
+
+    // For modifiers that support zero-match, try zero consumption first
+    if (
+      this.modifier === Modifier.ZeroOrMore ||
+      this.modifier === Modifier.Optional
+    ) {
+      const zeroMatch = this.tryPatternsAndChildren(path, pathIndex, baseUrl);
+      if (zeroMatch !== null) {
+        return zeroMatch;
+      }
+    }
+
+    // Try normal consumption if we matched something
+    if (consumedChars > 0) {
+      const newPathIndex = pathIndex + consumedChars;
+      return this.tryPatternsAndChildren(path, newPathIndex, baseUrl);
+    }
+
+    // For OneOrMore, if we couldn't consume anything, we still need to check
+    // if zero-consumption is valid according to URLPattern semantics
+    if (this.modifier === Modifier.OneOrMore && consumedChars === 0) {
+      // Try zero consumption for OneOrMore to match URLPattern behavior
+      const zeroMatch = this.tryPatternsAndChildren(path, pathIndex, baseUrl);
+      if (zeroMatch !== null) {
+        return zeroMatch;
+      }
+    }
+
+    return null;
   }
 
   #matchSingleSegment(remaining: string): number {
@@ -132,25 +446,27 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
       return this.#matchWithPrefixSuffix(remaining, true);
     }
 
-    if (remaining.length === 0 || !remaining.startsWith('/')) {
+    // Handle case where wildcard has no prefix and remaining doesn't start with /
+    // This happens in direct separation cases like /post/:id-:title where
+    // :title needs to match "foo" directly (not "/foo")
+    if (remaining.length === 0) {
       return 0;
     }
 
-    const segmentContent = remaining.slice(1);
-    if (segmentContent.length === 0) {
-      return 0;
-    }
-
-    let segmentLength = segmentContent.length;
-    const delimiters = ['/', '.', '?', '#', '&'];
-    for (const delimiter of delimiters) {
-      const delimiterIndex = segmentContent.indexOf(delimiter);
-      if (delimiterIndex !== -1 && delimiterIndex < segmentLength) {
-        segmentLength = delimiterIndex;
+    if (remaining.startsWith('/')) {
+      // Standard case: wildcard with implicit / prefix
+      const segmentContent = remaining.slice(1);
+      if (segmentContent.length === 0) {
+        return 0;
       }
-    }
 
-    return segmentLength > 0 ? 1 + segmentLength : 0;
+      // When there are no children to match, consume the entire remaining content
+      return 1 + segmentContent.length;
+    } else {
+      // Special case: wildcard with no prefix matching remaining content directly
+      // This happens after Fixed parts consume their content
+      return remaining.length;
+    }
   }
 
   #matchMultipleSegments(
@@ -158,13 +474,12 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     requireAtLeastOne: boolean,
   ): number {
     if (remaining.length === 0 || !remaining.startsWith('/')) {
-      return 0;
+      return requireAtLeastOne ? -1 : 0; // Return -1 to indicate failure for OneOrMore
     }
 
-    if (!requireAtLeastOne && false) {
-      return 0;
-    }
-
+    // For WildcardPrefixTreeNode with children, backtracking is handled
+    // in the main match() method above. This method is only used when
+    // there are no children.
     return remaining.length;
   }
 
@@ -173,16 +488,24 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
       return this.#matchWithPrefixSuffix(remaining, false);
     }
 
-    if (remaining.length === 0 || !remaining.startsWith('/')) {
+    if (remaining.length === 0) {
       return 0;
     }
 
-    const segmentContent = remaining.slice(1);
-    const nextSlashIndex = segmentContent.indexOf('/');
-    const segmentLength =
-      nextSlashIndex === -1 ? segmentContent.length : nextSlashIndex;
+    if (remaining.startsWith('/')) {
+      // Standard case: wildcard with implicit / prefix
+      const segmentContent = remaining.slice(1);
+      if (segmentContent.length === 0) {
+        return 0;
+      }
 
-    return segmentLength > 0 ? 1 + segmentLength : 0;
+      // When there are no children to match, consume the entire remaining content
+      return 1 + segmentContent.length;
+    } else {
+      // Special case: wildcard with no prefix matching remaining content directly
+      // This happens after Fixed parts consume their content
+      return remaining.length;
+    }
   }
 
   #matchWithPrefixSuffix(remaining: string, required: boolean): number {
@@ -205,12 +528,10 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
           }
         }
       } else {
-        // No suffix - consume until next delimiter or end of path
+        // No suffix - consume until end of current segment (up to next '/')
         let contentLength = 0;
-        const delimiters = ['/', '.', '?', '#', '&'];
-
         for (let i = 0; i < afterPrefix.length; i++) {
-          if (delimiters.includes(afterPrefix[i])) {
+          if (afterPrefix[i] === '/') {
             break;
           }
           contentLength++;
@@ -225,6 +546,50 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
     // Optional pattern - can match zero (no consumption) if not required
     return required ? 0 : 0;
   }
+
+  #matchOneOrMoreWithPrefix(remaining: string): number {
+    // For OneOrMore with prefix, we need to find all occurrences of the prefix
+    // and match as much as possible
+    if (!remaining.startsWith(this.prefix)) {
+      return -1; // OneOrMore requires at least one match
+    }
+
+    let totalConsumed = 0;
+    let currentRemaining = remaining;
+
+    // Keep matching prefix-based segments until we can't anymore
+    while (currentRemaining.startsWith(this.prefix)) {
+      const afterPrefix = currentRemaining.slice(this.prefix.length);
+
+      if (afterPrefix.length === 0) {
+        // Prefix at end of string - consume it
+        totalConsumed += this.prefix.length;
+        break;
+      }
+
+      // Find content until next '/' (end of segment)
+      let contentLength = 0;
+      for (let i = 0; i < afterPrefix.length; i++) {
+        const char = afterPrefix[i];
+        if (char === '/') {
+          break;
+        }
+        contentLength++;
+      }
+
+      if (contentLength > 0) {
+        // Consume prefix + content
+        const segmentLength = this.prefix.length + contentLength;
+        totalConsumed += segmentLength;
+        currentRemaining = currentRemaining.slice(segmentLength);
+      } else {
+        // No content after prefix, stop
+        break;
+      }
+    }
+
+    return totalConsumed > 0 ? totalConsumed : -1;
+  }
 }
 
 /**
@@ -235,22 +600,61 @@ export class WildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
 export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
   readonly modifier: number;
 
-  constructor(modifier: number = Modifier.None) {
+  constructor(modifier: number) {
     super();
     this.modifier = modifier;
   }
 
-  canMatch(part: ReturnType<typeof parse>[0]): boolean {
+  matchesPart(part: Part): boolean {
     return (
       part.type === PartType.FullWildcard && part.modifier === this.modifier
     );
   }
 
-  tryMatchAtPosition(path: string, pathIndex: number): number {
-    const remaining = path.length - pathIndex;
-    // Always return remaining characters to match URLPattern semantics exactly.
-    // URLPattern handles all modifier validation, so we defer to pattern.exec().
-    return remaining;
+  match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
+    // For modifiers that support zero-match, try zero consumption first
+    if (
+      this.modifier === Modifier.ZeroOrMore ||
+      this.modifier === Modifier.Optional ||
+      this.modifier === Modifier.OneOrMore
+    ) {
+      const zeroMatch = this.tryPatternsAndChildren(path, pathIndex, baseUrl);
+      if (zeroMatch !== null) {
+        return zeroMatch;
+      }
+    }
+
+    // For normal consumption, we need to be smart about how much to consume
+    // If we have children, we need to find the right consumption point
+    if (this.children.length > 0) {
+      // We have children, so we need to find all possible consumption points
+      // and try matching children at each point
+      const remaining = path.slice(pathIndex);
+
+      // Try different consumption lengths, from greedy (longest) to minimal
+      for (
+        let consumeLength = remaining.length;
+        consumeLength >= 0;
+        consumeLength--
+      ) {
+        const newPathIndex = pathIndex + consumeLength;
+        const match = this.tryPatternsAndChildren(path, newPathIndex, baseUrl);
+        if (match !== null) {
+          return match;
+        }
+      }
+    } else {
+      // No children, consume everything remaining (original behavior)
+      if (path.length > pathIndex) {
+        return this.tryPatternsAndChildren(path, path.length, baseUrl);
+      }
+    }
+
+    return null;
   }
 }
 
@@ -261,23 +665,36 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
  * @internal
  */
 export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
-  constructor(readonly regexValue: string) {
+  readonly regexValue: string;
+
+  constructor(regexValue: string) {
     super();
+    this.regexValue = regexValue;
   }
 
-  canMatch(part: ReturnType<typeof parse>[0]): boolean {
+  matchesPart(part: Part): boolean {
+    // We don't attempt to do any complex sharing of regex patterns, so we just
+    // check if the regex is exactly the same. Prefix sharing is therefore much
+    // worse for regexes, and the main optimization is for fixed and wildcard
+    // segments.
     return part.type === PartType.Regex && part.value === this.regexValue;
   }
 
-  tryMatchAtPosition(path: string, pathIndex: number): number {
+  match(
+    path: string,
+    pathIndex: number,
+    baseUrl: string | undefined,
+  ): InternalMatch<T> | null {
     const remaining = path.slice(pathIndex);
 
     if (remaining.length === 0) {
-      return 0;
+      return null;
     }
 
     // Extract the segment to test
     let segmentToTest: string;
+    let consumedChars: number;
+
     if (remaining.startsWith('/')) {
       // Regex with prefix "/" - extract segment after the "/"
       const segmentContent = remaining.slice(1);
@@ -288,12 +705,14 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
           : segmentContent.slice(0, nextSlashIndex);
 
       if (segmentToTest.length === 0) {
-        return 0; // Must have content after "/"
+        return null; // Must have content after "/"
       }
 
       // Test the segment against the regex
       if (this.#testRegexPattern(segmentToTest)) {
-        return 1 + segmentToTest.length; // "/" + segment length
+        consumedChars = 1 + segmentToTest.length; // "/" + segment length
+      } else {
+        return null;
       }
     } else {
       // Regex without prefix - test remaining path segment
@@ -302,16 +721,19 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
         nextSlashIndex === -1 ? remaining : remaining.slice(0, nextSlashIndex);
 
       if (segmentToTest.length === 0) {
-        return 0;
+        return null;
       }
 
       // Test the segment against the regex
       if (this.#testRegexPattern(segmentToTest)) {
-        return segmentToTest.length;
+        consumedChars = segmentToTest.length;
+      } else {
+        return null;
       }
     }
 
-    return 0; // Regex didn't match
+    const newPathIndex = pathIndex + consumedChars;
+    return this.tryPatternsAndChildren(path, newPathIndex, baseUrl);
   }
 
   /**
@@ -323,8 +745,9 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
       // For alternation like 'small|large', we need to wrap in a group
       let pattern = this.regexValue;
 
-      // If the pattern contains alternation (|) but is not wrapped in parentheses,
-      // we need to wrap it to ensure the alternation is scoped correctly
+      // If the pattern contains alternation (|) but is not wrapped in
+      // parentheses, we need to wrap it to ensure the alternation is scoped
+      // correctly
       if (pattern.includes('|') && !pattern.startsWith('(')) {
         pattern = `(${pattern})`;
       }
@@ -365,6 +788,7 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
  */
 export class URLPatternList<T> {
   #root: RootPrefixTreeNode<T>;
+  #sequenceCounter: number = 0;
 
   constructor() {
     this.#root = new RootPrefixTreeNode<T>();
@@ -375,7 +799,11 @@ export class URLPatternList<T> {
    */
   addPattern(pattern: URLPattern, value: T) {
     const parts = parse(pattern.pathname);
-    const item: URLPatternListItem<T> = {pattern, value};
+    const item: URLPatternListItem<T> = {
+      sequence: this.#sequenceCounter++,
+      pattern,
+      value,
+    };
     this.#addPatternToTree(this.#root, parts, 0, item);
   }
 
@@ -384,10 +812,14 @@ export class URLPatternList<T> {
    */
   #addPatternToTree(
     currentNode: PrefixTreeNode<T>,
-    parts: ReturnType<typeof parse>,
+    parts: Array<Part>,
     partIndex: number,
     item: URLPatternListItem<T>,
   ): void {
+    if (item.sequence > currentNode.maxSequence) {
+      currentNode.maxSequence = item.sequence;
+    }
+
     // If we've consumed all parts, this pattern ends at this node
     if (partIndex >= parts.length) {
       currentNode.patterns.push(item);
@@ -395,18 +827,6 @@ export class URLPatternList<T> {
     }
 
     const part = parts[partIndex];
-
-    // Special handling for ZeroOrMore (*), Optional (?), and OneOrMore (*+) modifiers
-    // These patterns can match here (consuming zero instances) OR continue matching
-    if (
-      part.modifier === Modifier.ZeroOrMore ||
-      part.modifier === Modifier.Optional ||
-      part.modifier === Modifier.OneOrMore
-    ) {
-      // For zero-match case, skip this part and add the remaining pattern from the next part
-      this.#addPatternToTree(currentNode, parts, partIndex + 1, item);
-    }
-
     const childNode = this.#getOrCreateChildNode(currentNode, part);
 
     // Continue building the tree with the next part
@@ -414,14 +834,16 @@ export class URLPatternList<T> {
   }
 
   /**
-   * Get or create a child node for the given part.
+   * Get or create a child node for the given part. Returns an existing node
+   * if it matches the part, or creates a new node if not found.
    */
   #getOrCreateChildNode(
     parent: PrefixTreeNode<T>,
-    part: ReturnType<typeof parse>[0],
+    part: Part,
   ): PrefixTreeNode<T> {
-    // Look for existing compatible node
-    const existingNode = parent.children.find((child) => child.canMatch(part));
+    const existingNode = parent.children.find((child) =>
+      child.matchesPart(part),
+    );
 
     if (existingNode) {
       return existingNode;
@@ -431,7 +853,7 @@ export class URLPatternList<T> {
 
     switch (part.type) {
       case PartType.Fixed:
-        node = new FixedPrefixTreeNode<T>(part.value);
+        node = new FixedPrefixTreeNode<T>(part.value, part.modifier);
         break;
       case PartType.SegmentWildcard:
         node = new WildcardPrefixTreeNode<T>(
@@ -461,7 +883,14 @@ export class URLPatternList<T> {
    * TODO (justinfagnani): Consider accepting URL objects and full URL strings.
    */
   match(path: string, baseUrl?: string): URLPatternListMatch<T> | null {
-    return this.#matchInTreeWithPath(path, 0, baseUrl, this.#root);
+    const match = this.#root.match(path, 0, baseUrl);
+    if (match !== null) {
+      return {
+        result: match.result,
+        value: match.item.value,
+      };
+    }
+    return null;
   }
 
   /**
@@ -473,42 +902,5 @@ export class URLPatternList<T> {
    */
   get _treeRoot(): PrefixTreeNode<T> {
     return this.#root;
-  }
-
-  /**
-   * Recursively match path through the prefix tree.
-   */
-  #matchInTreeWithPath(
-    path: string,
-    pathIndex: number,
-    baseUrl: string | undefined,
-    node: PrefixTreeNode<T>,
-  ): URLPatternListMatch<T> | null {
-    // If we've consumed the entire path, try patterns that end at this node
-    if (pathIndex >= path.length) {
-      for (const item of node.patterns) {
-        const result = item.pattern.exec(path, baseUrl);
-        if (result !== null) {
-          return {result, value: item.value};
-        }
-      }
-      return null;
-    }
-
-    // Try each child node to see if it can match from the current position
-    for (const childNode of node.children) {
-      const consumedChars = childNode.tryMatchAtPosition(path, pathIndex);
-      const match = this.#matchInTreeWithPath(
-        path,
-        pathIndex + consumedChars,
-        baseUrl,
-        childNode,
-      );
-      if (match) {
-        return match;
-      }
-    }
-
-    return null;
   }
 }

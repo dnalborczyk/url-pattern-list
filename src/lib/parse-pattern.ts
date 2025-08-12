@@ -373,6 +373,13 @@ class Parser {
         } else if (name === undefined && regexValue === '' && prefix === '') {
           // Empty group - ignore
         } else {
+          // Normalize Fixed parts with empty value but non-empty prefix
+          // Convert Fixed("") with prefix="s" to Fixed("s")
+          if (type === PartType.Fixed && regexValue === '' && prefix !== '') {
+            regexValue = prefix;
+            prefix = '';
+          }
+
           if (
             name === undefined &&
             (type === PartType.SegmentWildcard || type === PartType.Regex)

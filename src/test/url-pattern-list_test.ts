@@ -1,14 +1,11 @@
 import {describe as suite, test} from 'node:test';
-import {URLPatternList} from '../index.js';
+import {URLPatternList, type URLPatternListMatch} from '../index.js';
 import {NaiveURLPatternList} from './naive-url-pattern-list.js';
 import * as assert from 'node:assert';
 
 interface URLPatternListLike<T> {
   addPattern(pattern: URLPattern, value: T): void;
-  match(
-    path: string,
-    baseUrl?: string,
-  ): {result: URLPatternResult; value: T} | null;
+  match(path: string, baseUrl?: string): URLPatternListMatch<T> | null;
 }
 
 // Test implementations
@@ -26,6 +23,12 @@ const implementations: Array<{
   },
 ];
 
+type DeepPartial<T> = T extends object
+  ? {
+      [P in keyof T]?: DeepPartial<T[P]>;
+    }
+  : T;
+
 /**
  * URLPatternList tests with dual implementation validation.
  *
@@ -36,51 +39,185 @@ const implementations: Array<{
  */
 suite('URLPatternList implementations', () => {
   for (const impl of implementations) {
+    /**
+     * Creates a URLPatternList, adds patterns to it, matches a path, and
+     * asserts partial deep equality of the match result.
+     */
+    const assertMatch = <T>(
+      pathPatterns: Array<[string, T]>,
+      path: string,
+      expected: DeepPartial<URLPatternListMatch<T>> | null,
+    ) => {
+      const list = impl.create<T>();
+      for (const [pattern, value] of pathPatterns) {
+        list.addPattern(new URLPattern({pathname: pattern}), value);
+      }
+      const match = list.match(path, 'http://example.com');
+      assert.partialDeepStrictEqual(match, expected);
+    };
+
+    /**
+     * Asserts that the URLPatternList implementation behaves the same as
+     * URLPatternList in terms of matching paths against patterns. Creates a
+     * URLPatternList, adds a single pattern to it, matches a path, and asserts
+     * that the result is the same as calling `URLPattern.exec()`.
+     */
+    const assertURLPatternBehavior = (
+      pathPattern: string,
+      path: string,
+    ): void => {
+      const list = impl.create<undefined>();
+      const pattern = new URLPattern({pathname: pathPattern});
+      list.addPattern(pattern, undefined);
+      const listMatch = list.match(path, 'http://example.com');
+      const urlPatternMatch = pattern.exec(path, 'http://example.com');
+      assert.deepStrictEqual(
+        listMatch?.result ?? null,
+        urlPatternMatch,
+        `${pathPattern}, ${path}`,
+      );
+    };
+
     suite(impl.name, () => {
-      test('matches a single pattern and returns its value', () => {
-        const list = impl.create<string>();
-        const patternValue = 'testValue1';
-        list.addPattern(new URLPattern({pathname: '/foo'}), patternValue);
-        const match = list.match('/foo', 'http://example.com');
-        assert.ok(match, 'should match');
-        assert.deepStrictEqual(match?.result.pathname.groups, {});
-        assert.strictEqual(
-          match?.value,
-          patternValue,
-          'should return the correct value',
-        );
+      test('matches a single pattern and returns a match', () => {
+        assertMatch([['/foo/:bar', 'value-1']], '/foo/123', {
+          result: {
+            pathname: {
+              groups: {bar: '123'},
+            },
+          },
+          value: 'value-1',
+        });
       });
 
       test('returns null when no patterns match', () => {
-        const list = impl.create<number>();
-        list.addPattern(new URLPattern({pathname: '/foo'}), 1);
-        const match = list.match('/bar', 'http://example.com');
-        assert.strictEqual(match, null, 'should not match');
+        assertMatch([['/foo', 1]], '/foo/123', null);
+      });
+
+      test('matches the behavior of URLPattern', () => {
+        assertURLPatternBehavior('/foo', '/foo');
+        assertURLPatternBehavior('/foo', '/bar');
+
+        // Named parameters
+        assertURLPatternBehavior('/foo/:bar', '/foo/123');
+        assertURLPatternBehavior('/foo/:bar', '/foo');
+        assertURLPatternBehavior('/foo/:bar/baz', '/foo/123/baz');
+        assertURLPatternBehavior('/foo/:bar/baz', '/foo/123/456/baz');
+        assertURLPatternBehavior('/foo/:bar/baz', '/foo/baz');
+        assertURLPatternBehavior('/foo/:bar.txt', '/foo/123.txt');
+        assertURLPatternBehavior('/post/:id-:title', '/post/123');
+        assertURLPatternBehavior('/post/:id-:title', '/post/123-foo');
+        assertURLPatternBehavior('/post/:id-:title', '/post/123-foo-bar');
+        assertURLPatternBehavior('/post/:id!:title', '/post/123!foo');
+        assertURLPatternBehavior(
+          '/posts/:id-:slug-:category',
+          '/posts/123-hello-world-tech',
+        );
+
+        // Trailing wildcards
+        assertURLPatternBehavior('/foo/*', '/foo');
+        assertURLPatternBehavior('/foo/*', '/foo/');
+        assertURLPatternBehavior('/foo/*', '/foo/a');
+        assertURLPatternBehavior('/foo/*', '/foo/a/b');
+
+        // Wildcard in the middle
+        assertURLPatternBehavior('/foo/*/bar', '/foo/bar');
+        assertURLPatternBehavior('/foo/*/bar', '/foo/a/bar');
+        assertURLPatternBehavior('/foo/*/bar', '/foo/a/b/bar');
+        assertURLPatternBehavior('/foo/*.ext', '/foo/a/b');
+        assertURLPatternBehavior('/foo/*.ext', '/foo/a/b.ext');
+        assertURLPatternBehavior('/foo/*.ext', '/foo/a/b/c.ext');
+
+        // Modifiers: *
+        assertURLPatternBehavior('/foo/:id*/bar', '/foo/bar');
+        assertURLPatternBehavior('/foo/:id*/bar', '/foo/a/bar');
+        assertURLPatternBehavior('/foo/:id*/bar', '/foo/a/b/bar');
+
+        // Modifiers: +
+        assertURLPatternBehavior('/foo/:id+/bar', '/foo/bar');
+        assertURLPatternBehavior('/foo/:id+/bar', '/foo/a/bar');
+        assertURLPatternBehavior('/foo/:id+/bar', '/foo/a/b/bar');
+
+        // Modifiers: ?
+        assertURLPatternBehavior('/foo/:id?/bar', '/foo/bar');
+        assertURLPatternBehavior('/foo/:id?/bar', '/foo/a/bar');
+        assertURLPatternBehavior('/foo/:id?/bar', '/foo/a/b/bar');
+
+        // Unnamed regex capturing groups
+        assertURLPatternBehavior('/foo/(\\d+)/bar', '/foo/123/bar');
+        assertURLPatternBehavior('/foo/(\\d+)/bar', '/foo/abc/bar');
+
+        // Named regex capturing groups
+        assertURLPatternBehavior('/foo/:id(\\d+)/bar', '/foo/123/bar');
+        assertURLPatternBehavior('/foo/:id(\\d+)/bar', '/foo/abc/bar');
+
+        // Unnamed regex capturing groups with alternation
+        assertURLPatternBehavior('/foo/(a|b)/bar', '/foo/a/bar');
+        assertURLPatternBehavior('/foo/(a|b)/bar', '/foo/b/bar');
+        assertURLPatternBehavior('/foo/(a|b)/bar', '/foo/c/bar');
+
+        // Regex capturing groups with inner unnamed groups
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ab/bar');
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ac/bar');
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ad/bar');
+
+        // Regex capturing groups with inner named groups
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ab/bar');
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ac/bar');
+        assertURLPatternBehavior('/foo/(a(?:b|c))/bar', '/foo/ad/bar');
+
+        // Group delimiters
+        assertURLPatternBehavior('/products{/}', '/products');
+        assertURLPatternBehavior('/products{/}', '/products/');
+        assertURLPatternBehavior('/book{s}', '/book');
+        assertURLPatternBehavior('/book{s}', '/books');
+
+        assertURLPatternBehavior('/book{s}?', '/book');
+        assertURLPatternBehavior('/book{s}?', '/books');
+        assertURLPatternBehavior('/book{s}?', '/booksss');
+
+        assertURLPatternBehavior('/book{s}+', '/book');
+        assertURLPatternBehavior('/book{s}+', '/books');
+        assertURLPatternBehavior('/book{s}+', '/booksss');
+
+        assertURLPatternBehavior('/book{s}*', '/book');
+        assertURLPatternBehavior('/book{s}*', '/books');
+        assertURLPatternBehavior('/book{s}*', '/booksss');
+
+        assertURLPatternBehavior('/book{s}?/:id', '/book/123');
+        assertURLPatternBehavior('/book{s}?/:id', '/books/123');
+        assertURLPatternBehavior('/post/:id{-:title}', '/post/123');
+        assertURLPatternBehavior('/post/:id{-:title}', '/post/123-foo');
+
+        assertURLPatternBehavior('/post/:id{-:title}?', '/post/123');
+        assertURLPatternBehavior('/post/:id{-:title}?', '/post/123-foo');
+
+        assertURLPatternBehavior('/post/:id{-:title}+', '/post/123');
+        assertURLPatternBehavior('/post/:id{-:title}+', '/post/123-foo');
+        assertURLPatternBehavior('/post/:id{-:title}+', '/post/123-foo-bar');
+
+        assertURLPatternBehavior('/post/:id{-:title}*', '/post/123');
+        assertURLPatternBehavior('/post/:id{-:title}*', '/post/123-foo');
+        assertURLPatternBehavior('/post/:id{-:title}*', '/post/123-foo-bar');
+
+        assertURLPatternBehavior('/books/{:id}?', '/books/123');
+        assertURLPatternBehavior('/books/{:id}?', '/books');
+        assertURLPatternBehavior('/books/{:id}?', '/books/');
       });
 
       test('matches the first added pattern that tests true and returns its value', () => {
-        const list = impl.create<{type: string}>();
-        const value1 = {type: 'id'};
-        const value2 = {type: 'bookId'};
+        const list = impl.create<string>();
         // Pattern 1: matches /books/:id
-        list.addPattern(new URLPattern({pathname: '/books/:id'}), value1);
+        list.addPattern(new URLPattern({pathname: '/books/:id'}), 'id');
         // Pattern 2: also matches /books/*, but with a different group name
-        list.addPattern(new URLPattern({pathname: '/books/:bookId'}), value2);
+        list.addPattern(new URLPattern({pathname: '/books/:bookId'}), 'bookId');
 
         const match = list.match('/books/123', 'http://example.com');
-        assert.ok(match, 'should match');
+        assert.ok(match);
         // Assert that the first pattern was matched by checking its group name and
         // value
-        assert.deepStrictEqual(
-          match?.result.pathname.groups,
-          {id: '123'},
-          'Should match the first pattern and capture its group',
-        );
-        assert.strictEqual(
-          match?.value,
-          value1,
-          'Should return the value of the first matched pattern',
-        );
+        assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
+        assert.strictEqual(match?.value, 'id');
       });
 
       test('matches a pattern with a base URL and returns its value', () => {
@@ -88,7 +225,7 @@ suite('URLPatternList implementations', () => {
         const patternValue = true;
         list.addPattern(new URLPattern({pathname: '/foo'}), patternValue);
         const match = list.match('/foo', 'http://localhost');
-        assert.ok(match, 'should match with base URL');
+        assert.ok(match);
         assert.strictEqual(match?.value, patternValue);
       });
 
@@ -97,7 +234,7 @@ suite('URLPatternList implementations', () => {
         const patternValue = 'userRoute';
         list.addPattern(new URLPattern({pathname: '/users/:id'}), patternValue);
         const match = list.match('/users/123', 'http://example.com');
-        assert.ok(match, 'should match');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
         assert.strictEqual(match?.value, patternValue);
       });
@@ -105,44 +242,44 @@ suite('URLPatternList implementations', () => {
       test('returns null when list is empty', () => {
         const list = impl.create<any>();
         const match = list.match('/foo', 'http://example.com');
-        assert.strictEqual(match, null, 'should not match an empty list');
+        assert.strictEqual(match, null);
       });
 
       test('matches patterns in the order they were added and returns correct value', () => {
         const list = impl.create<string>();
-        const valueSpecific = 'item-id';
-        // This value won't be matched in the second case due to order
-        const valueGeneral = 'item-special';
 
         // More specific pattern by structure, but added first, so it takes
         // precedence for /items/:id type matches
-        list.addPattern(
-          new URLPattern({pathname: '/items/:id'}),
-          valueSpecific,
-        );
+        list.addPattern(new URLPattern({pathname: '/items/:id'}), 'id');
         list.addPattern(
           new URLPattern({pathname: '/items/special'}),
-          valueGeneral,
+          'item-special',
         );
 
         let match = list.match('/items/123', 'http://example.com');
-        assert.ok(match, 'should match /items/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
-        assert.strictEqual(match?.value, valueSpecific);
+        assert.strictEqual(match?.value, 'id');
 
         match = list.match('/items/special', 'http://example.com');
         // The first pattern '/items/:id' will match '/items/special' and
         // capture {id: 'special'}
-        assert.ok(
-          match,
-          'should match /items/:id for /items/special due to order',
-        );
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: 'special'});
-        assert.strictEqual(
-          match?.value,
-          valueSpecific,
-          'Should return value of the first pattern that matched',
+        assert.strictEqual(match?.value, 'id');
+      });
+
+      test.skip('matches first pattern with backtracking', () => {
+        const list = impl.create<string>();
+        list.addPattern(
+          new URLPattern({pathname: '/books/:id-:title'}),
+          'id-title',
         );
+        list.addPattern(new URLPattern({pathname: '/books/:id'}), 'id');
+
+        const match = list.match('/books/123-foo', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match.value, 'id-title');
       });
 
       test('addPattern correctly adds a pattern and value that can be matched', () => {
@@ -151,7 +288,7 @@ suite('URLPatternList implementations', () => {
         const pattern = new URLPattern({pathname: '/test-add'});
         list.addPattern(pattern, patternValue);
         const match = list.match('/test-add', 'http://example.com');
-        assert.ok(match, 'Pattern added via addPattern should be matchable');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {});
         assert.strictEqual(match?.value, patternValue);
       });
@@ -161,7 +298,7 @@ suite('URLPatternList implementations', () => {
         const v1 = 'wildcard-files';
         list.addPattern(new URLPattern({pathname: '/files/*'}), v1);
         const match1 = list.match('/files/document.txt', 'http://example.com');
-        assert.ok(match1, 'should match /files/document.txt');
+        assert.ok(match1);
         assert.deepStrictEqual(match1?.result.pathname.groups, {
           0: 'document.txt',
         });
@@ -171,7 +308,7 @@ suite('URLPatternList implementations', () => {
           '/files/archive/report.zip',
           'http://example.com',
         );
-        assert.ok(match2, 'should match /files/archive/report.zip');
+        assert.ok(match2);
         assert.deepStrictEqual(match2?.result.pathname.groups, {
           0: 'archive/report.zip',
         });
@@ -181,11 +318,7 @@ suite('URLPatternList implementations', () => {
           '/documents/report.pdf',
           'http://example.com',
         );
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match /documents/report.pdf',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles named groups (:) correctly', () => {
@@ -199,7 +332,7 @@ suite('URLPatternList implementations', () => {
           '/users/alice/profile/settings',
           'http://example.com',
         );
-        assert.ok(match, 'should match with named groups');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {
           userId: 'alice',
           section: 'settings',
@@ -207,11 +340,7 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(match?.value, v1);
 
         const noMatch = list.match('/users/bob/settings', 'http://example.com');
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match with missing group',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles optional named groups ({...}?) correctly', () => {
@@ -223,14 +352,14 @@ suite('URLPatternList implementations', () => {
         );
 
         const matchWithGroup = list.match('/api/v1/data', 'http://example.com');
-        assert.ok(matchWithGroup, 'should match with optional group present');
+        assert.ok(matchWithGroup);
         assert.deepStrictEqual(matchWithGroup?.result.pathname.groups, {
           version: '1',
         });
         assert.strictEqual(matchWithGroup?.value, v1);
 
         const matchWithoutGroup = list.match('/api/data', 'http://example.com');
-        assert.ok(matchWithoutGroup, 'should match with optional group absent');
+        assert.ok(matchWithoutGroup);
         assert.deepStrictEqual(matchWithoutGroup?.result.pathname.groups, {
           version: undefined,
         });
@@ -250,7 +379,7 @@ suite('URLPatternList implementations', () => {
           '/img/small/cat.jpg',
           'http://example.com',
         );
-        assert.ok(matchSmall, 'should match /img/small/cat.jpg');
+        assert.ok(matchSmall);
         assert.deepStrictEqual(matchSmall?.result.pathname.groups, {
           '0': 'small',
           name: 'cat',
@@ -261,7 +390,7 @@ suite('URLPatternList implementations', () => {
           '/img/large/dog.jpg',
           'http://example.com',
         );
-        assert.ok(matchLarge, 'should match /img/large/dog.jpg');
+        assert.ok(matchLarge);
         assert.deepStrictEqual(matchLarge?.result.pathname.groups, {
           '0': 'large',
           name: 'dog',
@@ -269,11 +398,7 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(matchLarge?.value, v1);
 
         const noMatch = list.match('/img/medium/rat.jpg', 'http://example.com');
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match /img/medium/rat.jpg',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles regex groups (...) correctly', () => {
@@ -283,16 +408,12 @@ suite('URLPatternList implementations', () => {
         list.addPattern(new URLPattern({pathname: '/product/:id(\\d+)'}), v1);
 
         const match = list.match('/product/12345', 'http://example.com');
-        assert.ok(match, 'should match /product/12345 with regex group');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '12345'});
         assert.strictEqual(match?.value, v1);
 
         const noMatch = list.match('/product/abc', 'http://example.com');
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match /product/abc with regex group',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles full wildcard (/*) at the end of a segment', () => {
@@ -304,7 +425,7 @@ suite('URLPatternList implementations', () => {
           '/data/items/item1/details',
           'http://example.com',
         );
-        assert.ok(match, 'should match path with wildcard segment');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {
           collection: 'items',
           0: 'item1/details',
@@ -313,11 +434,7 @@ suite('URLPatternList implementations', () => {
 
         // Wildcard expects something after /items/
         const noMatch = list.match('/data/items', 'http://example.com');
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match if wildcard part is empty and pattern expects content',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles plus (+) quantifier for named groups correctly', () => {
@@ -326,14 +443,14 @@ suite('URLPatternList implementations', () => {
         list.addPattern(new URLPattern({pathname: '/path/:segments+'}), v1);
 
         const matchOne = list.match('/path/a', 'http://example.com');
-        assert.ok(matchOne, 'should match one segment with +');
+        assert.ok(matchOne);
         assert.deepStrictEqual(matchOne?.result.pathname.groups, {
           segments: 'a',
         });
         assert.strictEqual(matchOne?.value, v1);
 
         const matchMultiple = list.match('/path/a/b/c', 'http://example.com');
-        assert.ok(matchMultiple, 'should match multiple segments with +');
+        assert.ok(matchMultiple);
         assert.deepStrictEqual(matchMultiple?.result.pathname.groups, {
           segments: 'a/b/c',
         });
@@ -341,11 +458,7 @@ suite('URLPatternList implementations', () => {
 
         // + requires at least one segment
         const noMatch = list.match('/path/', 'http://example.com');
-        assert.strictEqual(
-          noMatch,
-          null,
-          'should not match empty segments with +',
-        );
+        assert.strictEqual(noMatch, null);
       });
 
       test('handles star (*) quantifier for named groups correctly', () => {
@@ -354,21 +467,21 @@ suite('URLPatternList implementations', () => {
         list.addPattern(new URLPattern({pathname: '/path/:segments*'}), v1);
 
         const matchZero = list.match('/path', 'http://example.com');
-        assert.ok(matchZero, 'should match zero segments with *');
+        assert.ok(matchZero);
         assert.deepStrictEqual(matchZero?.result.pathname.groups, {
           segments: undefined,
         }); // Or {} depending on URLPattern polyfill behavior for empty * group
         assert.strictEqual(matchZero?.value, v1);
 
         const matchOne = list.match('/path/a', 'http://example.com');
-        assert.ok(matchOne, 'should match one segment with *');
+        assert.ok(matchOne);
         assert.deepStrictEqual(matchOne?.result.pathname.groups, {
           segments: 'a',
         });
         assert.strictEqual(matchOne?.value, v1);
 
         const matchMultiple = list.match('/path/a/b/c', 'http://example.com');
-        assert.ok(matchMultiple, 'should match multiple segments with *');
+        assert.ok(matchMultiple);
         assert.deepStrictEqual(matchMultiple?.result.pathname.groups, {
           segments: 'a/b/c',
         });
@@ -405,33 +518,33 @@ suite('URLPatternList implementations', () => {
 
         // Test patterns that share /api prefix
         let match = list.match('/api/users/profile', 'http://example.com');
-        assert.ok(match, 'should match /api/users/profile');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {});
         assert.strictEqual(match?.value, 'user-profile');
 
         match = list.match('/api/users/123', 'http://example.com');
-        assert.ok(match, 'should match /api/users/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
         assert.strictEqual(match?.value, 'user-detail');
 
         match = list.match('/api/posts/456', 'http://example.com');
-        assert.ok(match, 'should match /api/posts/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '456'});
         assert.strictEqual(match?.value, 'post-detail');
 
         match = list.match('/api/settings', 'http://example.com');
-        assert.ok(match, 'should match /api/settings');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {});
         assert.strictEqual(match?.value, 'settings');
 
         // Test patterns that share /blog prefix
         match = list.match('/blog/archives', 'http://example.com');
-        assert.ok(match, 'should match /blog/archives');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {});
         assert.strictEqual(match?.value, 'blog-archives');
 
         match = list.match('/blog/my-awesome-post', 'http://example.com');
-        assert.ok(match, 'should match /blog/:slug');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {
           slug: 'my-awesome-post',
         });
@@ -439,10 +552,10 @@ suite('URLPatternList implementations', () => {
 
         // Test non-matching paths
         match = list.match('/other/path', 'http://example.com');
-        assert.strictEqual(match, null, 'should not match unregistered paths');
+        assert.strictEqual(match, null);
 
         match = list.match('/api', 'http://example.com');
-        assert.strictEqual(match, null, 'should not match incomplete paths');
+        assert.strictEqual(match, null);
       });
 
       test('handles deep nested shared prefixes', () => {
@@ -472,28 +585,28 @@ suite('URLPatternList implementations', () => {
 
         // Test v1 API endpoints
         let match = list.match('/api/v1/users/123', 'http://example.com');
-        assert.ok(match, 'should match /api/v1/users/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
         assert.strictEqual(match?.value, 'v1-user');
 
         match = list.match('/api/v1/users/123/posts', 'http://example.com');
-        assert.ok(match, 'should match /api/v1/users/:id/posts');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
         assert.strictEqual(match?.value, 'v1-user-posts');
 
         match = list.match('/api/v1/posts/456', 'http://example.com');
-        assert.ok(match, 'should match /api/v1/posts/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '456'});
         assert.strictEqual(match?.value, 'v1-post');
 
         // Test v2 API endpoints
         match = list.match('/api/v2/users/789', 'http://example.com');
-        assert.ok(match, 'should match /api/v2/users/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '789'});
         assert.strictEqual(match?.value, 'v2-user');
 
         match = list.match('/api/v2/posts/101', 'http://example.com');
-        assert.ok(match, 'should match /api/v2/posts/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '101'});
         assert.strictEqual(match?.value, 'v2-post');
       });
@@ -522,24 +635,24 @@ suite('URLPatternList implementations', () => {
 
         // The dynamic pattern should match first for generic items
         let match = list.match('/items/123', 'http://example.com');
-        assert.ok(match, 'should match /items/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
         assert.strictEqual(match?.value, 'dynamic-item');
 
         // The first pattern should also match 'special' since it was added first
         match = list.match('/items/special', 'http://example.com');
-        assert.ok(match, 'should match first pattern for /items/special');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: 'special'});
         assert.strictEqual(match?.value, 'dynamic-item');
 
         // Test the nested patterns
         match = list.match('/items/featured/456', 'http://example.com');
-        assert.ok(match, 'should match /items/featured/:id');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: '456'});
         assert.strictEqual(match?.value, 'featured-item');
 
         match = list.match('/items/featured/top', 'http://example.com');
-        assert.ok(match, 'should match /items/featured/:id for top');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {id: 'top'});
         assert.strictEqual(match?.value, 'featured-item');
       });
@@ -585,12 +698,12 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(match?.value, 'user-post');
 
         match = list.match('/users/123/posts/drafts', 'http://example.com');
-        assert.ok(match, 'should match /users/:userId/posts/drafts');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {userId: '123'});
         assert.strictEqual(match?.value, 'user-drafts');
 
         match = list.match('/users/123/comments/789', 'http://example.com');
-        assert.ok(match, 'should match /users/:userId/comments/:commentId');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {
           userId: '123',
           commentId: '789',
@@ -598,14 +711,14 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(match?.value, 'user-comment');
 
         match = list.match('/users/123/settings', 'http://example.com');
-        assert.ok(match, 'should match /users/:userId/settings');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {userId: '123'});
         assert.strictEqual(match?.value, 'user-settings');
 
         // Test admin patterns - should share the '/admin/:adminId/' prefix
         // structure
         match = list.match('/admin/456/posts/789', 'http://example.com');
-        assert.ok(match, 'should match /admin/:adminId/posts/:postId');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {
           adminId: '456',
           postId: '789',
@@ -613,20 +726,16 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(match?.value, 'admin-post');
 
         match = list.match('/admin/456/posts/drafts', 'http://example.com');
-        assert.ok(match, 'should match /admin/:adminId/posts/drafts');
+        assert.ok(match);
         assert.deepStrictEqual(match?.result.pathname.groups, {adminId: '456'});
         assert.strictEqual(match?.value, 'admin-drafts');
 
         // Test non-matching paths
         match = list.match('/users/123/invalid', 'http://example.com');
-        assert.strictEqual(match, null, 'should not match invalid user paths');
+        assert.strictEqual(match, null);
 
         match = list.match('/other/123/posts/456', 'http://example.com');
-        assert.strictEqual(
-          match,
-          null,
-          'should not match non-user/admin paths',
-        );
+        assert.strictEqual(match, null);
       });
 
       test('handles OneOrMore wildcard modifiers to match URLPattern semantics exactly', () => {
@@ -637,11 +746,11 @@ suite('URLPatternList implementations', () => {
         list.addPattern(new URLPattern({pathname: '/api/*+'}), 'api-oneormore');
 
         let match = list.match('/api/', 'http://example.com');
-        assert.ok(match, 'should match /api/ with OneOrMore wildcard');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'api-oneormore');
 
         match = list.match('/api/something', 'http://example.com');
-        assert.ok(match, 'should match /api/something with OneOrMore wildcard');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'api-oneormore');
 
         // Test case 2: OneOrMore wildcard without path separator
@@ -654,21 +763,15 @@ suite('URLPatternList implementations', () => {
         // Verify direct URLPattern behavior first
         const directPattern = new URLPattern({pathname: '/test*+'});
         const directResult = directPattern.exec('/test', 'http://example.com');
-        assert.ok(
-          directResult,
-          'URLPattern should match /test*+ against /test',
-        );
+        assert.ok(directResult);
 
         // Our implementation should match URLPattern behavior
         match = list2.match('/test', 'http://example.com');
-        assert.ok(
-          match,
-          'should match /test with OneOrMore wildcard to match URLPattern semantics',
-        );
+        assert.ok(match);
         assert.strictEqual(match?.value, 'test-oneormore');
 
         match = list2.match('/testcontent', 'http://example.com');
-        assert.ok(match, 'should match /testcontent with OneOrMore wildcard');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'test-oneormore');
       });
 
@@ -687,17 +790,10 @@ suite('URLPatternList implementations', () => {
 
         // These should match even when the optional/zero-or-more parts consume nothing
         let match = list.match('/path', 'http://example.com');
-        assert.ok(
-          match,
-          'should match pattern with optional parameter consuming nothing',
-        );
+        assert.ok(match);
 
         // Test precedence - first pattern should win
-        assert.strictEqual(
-          match?.value,
-          'optional-param',
-          'first pattern should match',
-        );
+        assert.strictEqual(match?.value, 'optional-param');
       });
 
       test('eliminates redundant FullWildcard matching loops', () => {
@@ -712,18 +808,387 @@ suite('URLPatternList implementations', () => {
 
         // Specific pattern should win due to first-match-wins semantics
         let match = list.match('/api/users/123', 'http://example.com');
-        assert.ok(match, 'should match specific pattern');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'specific');
 
         // Wildcard should match other paths
         match = list.match('/api/other/path', 'http://example.com');
-        assert.ok(match, 'should match wildcard pattern');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'wildcard');
 
         // Test edge case: wildcard at path boundary
         match = list.match('/api/', 'http://example.com');
-        assert.ok(match, 'should match wildcard at path boundary');
+        assert.ok(match);
         assert.strictEqual(match?.value, 'wildcard');
+      });
+
+      test('handles multiple competing wildcard patterns with first-match semantics', () => {
+        const list = impl.create<string>();
+
+        // Add multiple wildcard patterns that could all match the same path
+        list.addPattern(
+          new URLPattern({pathname: '/files/*'}),
+          'files-catch-all',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/files/:type/*'}),
+          'files-typed',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/files/images/*'}),
+          'files-images',
+        );
+
+        // First pattern should win
+        let match = list.match('/files/images/photo.jpg', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'files-catch-all');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          0: 'images/photo.jpg',
+        });
+
+        // Test with different path - still first pattern wins
+        match = list.match('/files/documents/report.pdf', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'files-catch-all');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          0: 'documents/report.pdf',
+        });
+      });
+
+      // TODO (justinfagnani): fix first-match semantics
+      test.skip('handles complex backtracking scenarios with multiple patterns', () => {
+        const list = impl.create<string>();
+
+        // Patterns that require proper backtracking to find the right match
+        list.addPattern(
+          new URLPattern({pathname: '/posts/:id-:slug-:category'}),
+          'three-part',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/posts/:id-:slug'}),
+          'two-part',
+        );
+        list.addPattern(new URLPattern({pathname: '/posts/:id'}), 'one-part');
+
+        // Should match the most specific pattern that works
+        let match = list.match(
+          '/posts/123-hello-world-tech',
+          'http://example.com',
+        );
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'three-part');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          id: '123',
+          slug: 'hello',
+          category: 'world-tech',
+        });
+
+        // Should match two-part pattern when three-part fails
+        match = list.match('/posts/123-hello', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'two-part');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          id: '123',
+          slug: 'hello',
+        });
+
+        // Should match one-part pattern when others fail
+        match = list.match('/posts/123', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'one-part');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          id: '123',
+        });
+      });
+
+      test('handles regex patterns with overlapping matches', () => {
+        const list = impl.create<string>();
+
+        // Multiple regex patterns that could potentially match similar inputs
+        list.addPattern(
+          new URLPattern({pathname: '/api/:version(v\\d+)/:resource'}),
+          'versioned-api',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/api/:category([a-z]+)/:resource'}),
+          'category-api',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/api/:anything/:resource'}),
+          'generic-api',
+        );
+
+        // Version pattern should match
+        let match = list.match('/api/v1/users', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'versioned-api');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          version: 'v1',
+          resource: 'users',
+        });
+
+        // Category pattern should match when version doesn't
+        match = list.match('/api/admin/users', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'category-api');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          category: 'admin',
+          resource: 'users',
+        });
+
+        // Generic should match when others don't
+        match = list.match('/api/123abc/users', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'generic-api');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          anything: '123abc',
+          resource: 'users',
+        });
+      });
+
+      test('handles patterns with multiple optional segments and precedence', () => {
+        const list = impl.create<string>();
+
+        // Patterns with different levels of optional segments
+        list.addPattern(
+          new URLPattern({pathname: '/shop/:category?/:subcategory?/:item?'}),
+          'shop-flexible',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/shop/:category/:item'}),
+          'shop-specific',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/shop/special'}),
+          'shop-special',
+        );
+
+        // First pattern should match due to first-match-wins
+        let match = list.match(
+          '/shop/electronics/phones',
+          'http://example.com',
+        );
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'shop-flexible');
+
+        // Should still match first pattern for special case
+        match = list.match('/shop/special', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'shop-flexible');
+
+        // Test different levels of the flexible pattern
+        match = list.match('/shop', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'shop-flexible');
+
+        match = list.match('/shop/electronics', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'shop-flexible');
+      });
+
+      test('stress test with many patterns sharing prefixes', () => {
+        const list = impl.create<number>();
+
+        // Add many patterns with shared prefixes to test performance and correctness
+        const patterns = [
+          '/api/v1/users',
+          '/api/v1/users/:id',
+          '/api/v1/users/:id/posts',
+          '/api/v1/users/:id/posts/:postId',
+          '/api/v1/posts',
+          '/api/v1/posts/:id',
+          '/api/v1/comments',
+          '/api/v1/comments/:id',
+          '/api/v2/users',
+          '/api/v2/users/:id',
+          '/api/v2/posts',
+          '/api/v2/posts/:id',
+          '/blog/posts',
+          '/blog/posts/:slug',
+          '/blog/categories',
+          '/blog/categories/:name',
+          '/shop/products',
+          '/shop/products/:id',
+          '/shop/categories',
+          '/shop/cart',
+        ];
+
+        patterns.forEach((pattern, index) => {
+          list.addPattern(new URLPattern({pathname: pattern}), index);
+        });
+
+        // Test that first-match behavior is preserved even with many patterns
+        let match = list.match('/api/v1/users/123', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 1); // Second pattern: '/api/v1/users/:id'
+
+        match = list.match('/blog/posts/my-post', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 13); // Pattern: '/blog/posts/:slug'
+
+        // Test unmatched path
+        match = list.match('/unmatched/path', 'http://example.com');
+        assert.strictEqual(match, null);
+      });
+
+      test('handles edge case with competing quantifiers', () => {
+        const list = impl.create<string>();
+
+        // Patterns with different quantifiers that could match the same path
+        list.addPattern(
+          new URLPattern({pathname: '/path/:segments+/end'}),
+          'one-or-more',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/path/:segments*/end'}),
+          'zero-or-more',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/path/:segment?/end'}),
+          'optional',
+        );
+
+        // First pattern should win when it can match
+        let match = list.match('/path/a/b/end', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'one-or-more');
+
+        match = list.match('/path/a/end', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'one-or-more');
+
+        // When + pattern can't match (needs at least one segment)
+        match = list.match('/path/end', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'zero-or-more');
+      });
+
+      test('handles root path and empty segment edge cases', () => {
+        const list = impl.create<string>();
+
+        // Test root path and paths with empty segments
+        // Note: Order matters for first-match-wins behavior
+        list.addPattern(new URLPattern({pathname: '/'}), 'root');
+        list.addPattern(new URLPattern({pathname: '/api'}), 'api-no-slash');
+        list.addPattern(
+          new URLPattern({pathname: '/api/'}),
+          'api-trailing-slash',
+        );
+        list.addPattern(new URLPattern({pathname: '/:param'}), 'root-param');
+
+        // Root path should match first pattern
+        let match = list.match('/', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'root');
+
+        // /api should match the specific api pattern, not the param pattern
+        match = list.match('/api', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'api-no-slash');
+
+        // Trailing slash behavior
+        match = list.match('/api/', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'api-trailing-slash');
+
+        // Other single segments should match the param pattern
+        match = list.match('/test', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'root-param');
+        assert.deepStrictEqual(match?.result.pathname.groups, {param: 'test'});
+      });
+
+      test.skip('handles patterns with special characters and escaping', () => {
+        const list = impl.create<string>();
+
+        // Patterns with special characters that need proper handling
+        list.addPattern(
+          new URLPattern({pathname: '/files/:name\\.pdf'}),
+          'pdf-literal-dot',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/path\\(:id\\)'}),
+          'literal-parens',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/api\\+plus/:id'}),
+          'literal-plus',
+        );
+
+        // These should match literal characters, not regex patterns
+        let match = list.match('/files/document.pdf', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'pdf-literal-dot');
+        assert.deepStrictEqual(match?.result.pathname.groups, {
+          name: 'document',
+        });
+
+        // Should not match without the literal dot
+        match = list.match('/files/documentXpdf', 'http://example.com');
+        assert.strictEqual(match, null);
+
+        match = list.match('/path(123)', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'literal-parens');
+        assert.deepStrictEqual(match?.result.pathname.groups, {id: '123'});
+
+        match = list.match('/api+plus/456', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'literal-plus');
+        assert.deepStrictEqual(match?.result.pathname.groups, {id: '456'});
+      });
+
+      test('handles empty list and null/undefined edge cases', () => {
+        const list = impl.create<string>();
+
+        // Empty list should return null for any path
+        let match = list.match('/', 'http://example.com');
+        assert.strictEqual(match, null);
+
+        match = list.match('/any/path', 'http://example.com');
+        assert.strictEqual(match, null);
+
+        // After adding and removing patterns (if supported), should behave correctly
+        list.addPattern(new URLPattern({pathname: '/test'}), 'test-value');
+        match = list.match('/test', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'test-value');
+      });
+
+      test('handles complex nested group patterns with first-match semantics', () => {
+        const list = impl.create<string>();
+
+        // Complex patterns with alternation
+        list.addPattern(
+          new URLPattern({pathname: '/api/(v1|v2)/:resource/:id'}),
+          'complex-versioned',
+        );
+        list.addPattern(
+          new URLPattern({pathname: '/api/:version/:resource/:id'}),
+          'simple-api',
+        );
+        list.addPattern(new URLPattern({pathname: '/api/*'}), 'api-fallback');
+
+        // First pattern should match when it can
+        let match = list.match('/api/v1/users/123', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'complex-versioned');
+
+        // Test with v2
+        match = list.match('/api/v2/posts/456', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'complex-versioned');
+
+        // When complex pattern doesn't match, should fall back to simple
+        match = list.match('/api/v3/comments/789', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'simple-api');
+
+        // When neither matches proper structure, should fall back to wildcard
+        match = list.match('/api/invalid/structure', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match?.value, 'api-fallback');
       });
     });
   }

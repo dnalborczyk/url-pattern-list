@@ -22,7 +22,7 @@ export class NaiveURLPatternList<T> {
    * Add a URL pattern to the collection.
    */
   addPattern(pattern: URLPattern, value: T): void {
-    this.#patterns.push({pattern, value});
+    this.#patterns.push({sequence: 0, pattern, value});
   }
 
   /**
