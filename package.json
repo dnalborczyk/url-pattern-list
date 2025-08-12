@@ -1,6 +1,6 @@
 {
   "name": "url-pattern-list",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Efficiently match URLs against a collection of URL patterns",
   "type": "module",
   "main": "index.js",
