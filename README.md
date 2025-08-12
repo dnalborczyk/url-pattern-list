@@ -72,6 +72,10 @@ npm run benchmark
 
 The main class for managing and matching URL patterns.
 
+```ts
+import {URLPatternList} from 'url-pattern-list';
+```
+
 #### Methods
 
 ##### `addPattern(pattern: URLPattern, value: T): void`
@@ -103,15 +107,6 @@ if (match) {
 interface URLPatternListMatch<T> {
   result: URLPatternResult; // Standard URLPattern match result
   value: T; // Your associated value
-}
-```
-
-#### URLPatternListItem&lt;T&gt;
-
-```typescript
-interface URLPatternListItem<T> {
-  pattern: URLPattern;
-  value: T;
 }
 ```
 
