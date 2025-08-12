@@ -269,7 +269,7 @@ suite('URLPatternList implementations', () => {
         assert.strictEqual(match?.value, 'id');
       });
 
-      test.skip('matches first pattern with backtracking', () => {
+      test('matches first pattern with backtracking', () => {
         const list = impl.create<string>();
         list.addPattern(
           new URLPattern({pathname: '/books/:id-:title'}),
@@ -857,7 +857,7 @@ suite('URLPatternList implementations', () => {
       });
 
       // TODO (justinfagnani): fix first-match semantics
-      test.skip('handles complex backtracking scenarios with multiple patterns', () => {
+      test('handles complex backtracking scenarios with multiple patterns', () => {
         const list = impl.create<string>();
 
         // Patterns that require proper backtracking to find the right match
@@ -1099,7 +1099,7 @@ suite('URLPatternList implementations', () => {
         assert.deepStrictEqual(match?.result.pathname.groups, {param: 'test'});
       });
 
-      test.skip('handles patterns with special characters and escaping', () => {
+      test('handles patterns with special characters and escaping', () => {
         const list = impl.create<string>();
 
         // Patterns with special characters that need proper handling
@@ -1154,6 +1154,58 @@ suite('URLPatternList implementations', () => {
         match = list.match('/test', 'http://example.com');
         assert.ok(match);
         assert.strictEqual(match?.value, 'test-value');
+      });
+
+      test('maintains first-match semantics despite tree insertion order optimization', () => {
+        const list = impl.create<string>();
+
+        // Pattern A: Doesn't match our test path, but establishes a wildcard
+        // prefix first in the tree.
+        list.addPattern(
+          new URLPattern({pathname: '/:section/:title.txt'}),
+          'A',
+        );
+
+        // Pattern B: Matches our test path, but does not share a prefix with
+        // pattern A, so it's inserted as a later sibling.
+        list.addPattern(
+          new URLPattern({pathname: '/special/:title.html'}),
+          'B',
+        );
+
+        // Pattern C: Also matches our test path, but shares the wildcard prefix
+        // with pattern A, so it's inserted earlier in the tree than pattern B.
+        list.addPattern(
+          new URLPattern({pathname: '/:section/:title.html'}),
+          'C',
+        );
+
+        // Test path '/special/foo.html' should match pattern B (second added),
+        // NOT pattern C (third added), even though pattern C might be found
+        // earlier in tree traversal due to sharing the wildcard prefix with
+        // pattern A.
+        const match = list.match('/special/foo.html', 'http://example.com');
+        assert.ok(match);
+        assert.strictEqual(match.value, 'B');
+        assert.deepStrictEqual(match.result.pathname.groups, {title: 'foo'});
+
+        // Verify that Pattern A still works for its intended path
+        const matchA = list.match('/docs/readme.txt', 'http://example.com');
+        assert.ok(matchA);
+        assert.strictEqual(matchA.value, 'A');
+        assert.deepStrictEqual(matchA.result.pathname.groups, {
+          section: 'docs',
+          title: 'readme',
+        });
+
+        // Verify that Pattern C works when Pattern B doesn't match
+        const matchC = list.match('/blog/post.html', 'http://example.com');
+        assert.ok(matchC);
+        assert.strictEqual(matchC.value, 'C');
+        assert.deepStrictEqual(matchC.result.pathname.groups, {
+          section: 'blog',
+          title: 'post',
+        });
       });
 
       test('handles complex nested group patterns with first-match semantics', () => {

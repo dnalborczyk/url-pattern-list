@@ -19,9 +19,10 @@ export interface URLPatternListMatch<T> {
  */
 export abstract class PrefixTreeNode<T> {
   /**
-   * Maximum sequence number for this node.
+   * Minimum sequence number for this node - represents the earliest pattern
+   * that can be matched through this node.
    */
-  maxSequence: number = Number.MAX_SAFE_INTEGER;
+  minSequence: number = Number.MAX_SAFE_INTEGER;
 
   /**
    * Patterns that end at this node (for exact matches)
@@ -72,7 +73,7 @@ export abstract class PrefixTreeNode<T> {
 
     // Then try each child node to see if it can match from the current position
     for (const childNode of this.children) {
-      if (bestMatch !== null && childNode.maxSequence < bestMatch.sequence) {
+      if (bestMatch !== null && childNode.minSequence > bestMatch.sequence) {
         continue;
       }
       const newMatch = childNode.match(path, pathIndex, baseUrl);
@@ -620,16 +621,20 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
       }
     }
 
-    // For normal consumption, we need to be smart about how much to consume
-    // If we have children, we need to find the right consumption point
-    if (this.children.length > 0) {
-      // We have children, so we need to find all possible consumption points
-      // and try matching children at each point
-      const remaining = path.slice(pathIndex);
-
-      // Try different consumption lengths, from greedy (longest) to minimal
+    if (this.children.length === 0) {
+      // We have no children, so consume everything remaining
+      if (path.length > pathIndex) {
+        return this.tryPatternsAndChildren(path, path.length, baseUrl);
+      }
+    } else {
+      // We have children, so we need to be able to backtrack if necessary. We
+      // try to match greedily first, then backtrack character by character if
+      // we haven't found a match.
+      // TODO: Does this introduce a "catastrophic backtracking" vulnerability?
+      // We need to try pathological cases like '/*/*/index.html' and see how we
+      // can prevent exponential backtracking.
       for (
-        let consumeLength = remaining.length;
+        let consumeLength = path.length - pathIndex;
         consumeLength >= 0;
         consumeLength--
       ) {
@@ -638,11 +643,6 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
         if (match !== null) {
           return match;
         }
-      }
-    } else {
-      // No children, consume everything remaining (original behavior)
-      if (path.length > pathIndex) {
-        return this.tryPatternsAndChildren(path, path.length, baseUrl);
       }
     }
 
@@ -677,9 +677,7 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
     pathIndex: number,
     baseUrl: string | undefined,
   ): URLPatternListItem<T> | null {
-    const remaining = path.slice(pathIndex);
-
-    if (remaining.length === 0) {
+    if (pathIndex >= path.length) {
       return null;
     }
 
@@ -687,14 +685,10 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
     let segmentToTest: string;
     let consumedChars: number;
 
-    if (remaining.startsWith('/')) {
+    if (path.startsWith('/', pathIndex)) {
       // Regex with prefix "/" - extract segment after the "/"
-      const segmentContent = remaining.slice(1);
-      const nextSlashIndex = segmentContent.indexOf('/');
-      segmentToTest =
-        nextSlashIndex === -1
-          ? segmentContent
-          : segmentContent.slice(0, nextSlashIndex);
+      const nextSlashIndex = path.indexOf('/', pathIndex + 1);
+      segmentToTest = path.slice(pathIndex + 1, nextSlashIndex >>> 0);
 
       if (segmentToTest.length === 0) {
         return null; // Must have content after "/"
@@ -708,9 +702,8 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
       }
     } else {
       // Regex without prefix - test remaining path segment
-      const nextSlashIndex = remaining.indexOf('/');
-      segmentToTest =
-        nextSlashIndex === -1 ? remaining : remaining.slice(0, nextSlashIndex);
+      const nextSlashIndex = path.indexOf('/', pathIndex);
+      segmentToTest = path.slice(pathIndex, nextSlashIndex >>> 0);
 
       if (segmentToTest.length === 0) {
         return null;
@@ -808,8 +801,8 @@ export class URLPatternList<T> {
     partIndex: number,
     item: URLPatternListItem<T>,
   ): void {
-    if (item.sequence > currentNode.maxSequence) {
-      currentNode.maxSequence = item.sequence;
+    if (item.sequence < currentNode.minSequence) {
+      currentNode.minSequence = item.sequence;
     }
 
     // If we've consumed all parts, this pattern ends at this node
