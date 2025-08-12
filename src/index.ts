@@ -657,11 +657,29 @@ export class FullWildcardPrefixTreeNode<T> extends PrefixTreeNode<T> {
  * @internal
  */
 export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
-  readonly regexValue: string;
+  readonly regexString: string;
+  readonly regex: RegExp | null = null;
 
-  constructor(regexValue: string) {
+  constructor(regexString: string) {
     super();
-    this.regexValue = regexValue;
+    this.regexString = regexString;
+    try {
+      // The regex string should already be a complete regex pattern
+      // For alternation like 'small|large', we need to wrap in a group
+      let pattern = regexString;
+
+      // If the pattern contains alternation (|) but is not wrapped in
+      // parentheses, we need to wrap it to ensure the alternation is scoped
+      // correctly
+      if (pattern.includes('|') && !pattern.startsWith('(')) {
+        pattern = `(${pattern})`;
+      }
+
+      this.regex = new RegExp(`^${pattern}$`);
+    } catch (error: any) {
+      // If regex is invalid, leave as null for fallback handling
+      this.regex = null;
+    }
   }
 
   matchesPart(part: Part): boolean {
@@ -669,7 +687,7 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
     // check if the regex is exactly the same. Prefix sharing is therefore much
     // worse for regexes, and the main optimization is for fixed and wildcard
     // segments.
-    return part.type === PartType.Regex && part.value === this.regexValue;
+    return part.type === PartType.Regex && part.value === this.regexString;
   }
 
   match(
@@ -725,21 +743,10 @@ export class RegexPrefixTreeNode<T> extends PrefixTreeNode<T> {
    * Test if a segment matches this regex pattern
    */
   #testRegexPattern(segment: string): boolean {
-    try {
-      // The regex value should already be a complete regex pattern
-      // For alternation like 'small|large', we need to wrap in a group
-      let pattern = this.regexValue;
-
-      // If the pattern contains alternation (|) but is not wrapped in
-      // parentheses, we need to wrap it to ensure the alternation is scoped
-      // correctly
-      if (pattern.includes('|') && !pattern.startsWith('(')) {
-        pattern = `(${pattern})`;
-      }
-
-      const regex = new RegExp(`^${pattern}$`);
-      return regex.test(segment);
-    } catch (error: any) {
+    // Use cached compiled regex if available
+    if (this.regex) {
+      return this.regex.test(segment);
+    } else {
       // If regex is invalid, fall back to allowing any content
       // This ensures we don't break on malformed patterns
       return true;
@@ -826,12 +833,10 @@ export class URLPatternList<T> {
     parent: PrefixTreeNode<T>,
     part: Part,
   ): PrefixTreeNode<T> {
-    const existingNode = parent.children.find((child) =>
-      child.matchesPart(part),
-    );
-
-    if (existingNode) {
-      return existingNode;
+    for (const child of parent.children) {
+      if (child.matchesPart(part)) {
+        return child;
+      }
     }
 
     let node: PrefixTreeNode<T>;
