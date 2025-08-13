@@ -135,6 +135,11 @@ support:
 For older browsers, you can use a [URLPattern
 polyfill](https://github.com/kenchris/urlpattern-polyfill).
 
+## Visualizer
+
+This package includes a visualizer utility to help understand the tree structure
+of a list. See [`visualizer.md`](./visualizer.md) for more information.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

@@ -39,12 +39,21 @@
     "index.d.ts",
     "index.js.map",
     "index.d.ts.map",
-    "lib"
+    "visualizer.js",
+    "visualizer.d.ts",
+    "visualizer.js.map",
+    "visualizer.d.ts.map",
+    "lib",
+    "visualizer.md"
   ],
   "exports": {
     ".": {
       "types": "./index.d.ts",
       "default": "./index.js"
+    },
+    "./visualizer.js": {
+      "types": "./visualizer.d.ts",
+      "default": "./visualizer.js"
     }
   },
   "wireit": {
@@ -56,6 +65,7 @@
       ],
       "outputs": [
         "index.{js,d.ts,js.map,d.ts.map}",
+        "visualizer.{js,d.ts,js.map,d.ts.map}",
         "lib"
       ],
       "clean": "if-file-deleted"
