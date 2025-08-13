@@ -1,12 +1,10 @@
 import {describe as suite, test} from 'node:test';
 import {URLPatternList, type URLPatternListMatch} from '../index.js';
-import {NaiveURLPatternList} from './naive-url-pattern-list.js';
+import {
+  NaiveURLPatternList,
+  type URLPatternListLike,
+} from './naive-url-pattern-list.js';
 import * as assert from 'node:assert';
-
-interface URLPatternListLike<T> {
-  addPattern(pattern: URLPattern, value: T): void;
-  match(path: string, baseUrl?: string): URLPatternListMatch<T> | null;
-}
 
 // Test implementations
 const implementations: Array<{
@@ -63,18 +61,25 @@ suite('URLPatternList implementations', () => {
      * that the result is the same as calling `URLPattern.exec()`.
      */
     const assertURLPatternBehavior = (
-      pathPattern: string,
+      input: string | URLPatternInit,
       path: string,
+      baseURL = 'http://example.com',
     ): void => {
+      let pattern: URLPattern;
+      if (typeof input === 'string') {
+        pattern = new URLPattern(input, baseURL);
+      } else {
+        pattern = new URLPattern(input);
+      }
       const list = impl.create<undefined>();
-      const pattern = new URLPattern({pathname: pathPattern});
       list.addPattern(pattern, undefined);
-      const listMatch = list.match(path, 'http://example.com');
-      const urlPatternMatch = pattern.exec(path, 'http://example.com');
+      const url = new URL(path, baseURL);
+      const listMatch = list.match(url.toString(), baseURL);
+      const urlPatternMatch = pattern.exec(url.toString(), baseURL);
       assert.deepStrictEqual(
         listMatch?.result ?? null,
         urlPatternMatch,
-        `${pathPattern}, ${path}`,
+        `${input}, ${path}`,
       );
     };
 
@@ -94,7 +99,7 @@ suite('URLPatternList implementations', () => {
         assertMatch([['/foo', 1]], '/foo/123', null);
       });
 
-      test('matches the behavior of URLPattern', () => {
+      test('matches the behavior of URLPattern for pathname', () => {
         assertURLPatternBehavior('/foo', '/foo');
         assertURLPatternBehavior('/foo', '/bar');
 
@@ -203,6 +208,37 @@ suite('URLPatternList implementations', () => {
         assertURLPatternBehavior('/books/{:id}?', '/books/123');
         assertURLPatternBehavior('/books/{:id}?', '/books');
         assertURLPatternBehavior('/books/{:id}?', '/books/');
+      });
+
+      test('matches the behavior of URLPattern for search and hash', () => {
+        assertURLPatternBehavior(
+          {
+            pathname: '/api',
+            search: 'paths=:item+',
+          },
+          'https://example.com/api?paths=item1/subitem&other=value',
+        );
+        assertURLPatternBehavior(
+          {
+            pathname: '/docs',
+            hash: 'route=:path*',
+          },
+          'https://example.com/docs#route=admin/users/permissions',
+        );
+        assertURLPatternBehavior(
+          {
+            pathname: '/files',
+            search: 'download=:filepath',
+          },
+          'https://example.com/files?download=documents/2024/report.pdf',
+        );
+        assertURLPatternBehavior(
+          {
+            pathname: '/api',
+            search: 'data=start-:content-end',
+          },
+          'https://example.com/api?data=start-path/to/resource-end',
+        );
       });
 
       test('matches the first added pattern that tests true and returns its value', () => {
@@ -1241,6 +1277,361 @@ suite('URLPatternList implementations', () => {
         match = list.match('/api/invalid/structure', 'http://example.com');
         assert.ok(match);
         assert.strictEqual(match?.value, 'api-fallback');
+      });
+
+      suite('match() - Full URL Pattern Matching', () => {
+        test('matches protocol-specific patterns', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.example.com',
+              pathname: '/users/:id',
+            }),
+            'secure-api',
+          );
+          list.addPattern(
+            new URLPattern({
+              protocol: 'http',
+              hostname: 'api.example.com',
+              pathname: '/users/:id',
+            }),
+            'insecure-api',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/users/:id',
+            }),
+            'any-protocol',
+          );
+
+          // Should match specific protocols first
+          let match = list.match('https://api.example.com/users/123');
+          assert.strictEqual(match?.value, 'secure-api');
+          assert.strictEqual(match?.result.pathname.groups.id, '123');
+
+          match = list.match('http://api.example.com/users/123');
+          assert.strictEqual(match?.value, 'insecure-api');
+          assert.strictEqual(match?.result.pathname.groups.id, '123');
+
+          // Different hostname should match fallback
+          match = list.match('https://other.example.com/users/456');
+          assert.strictEqual(match?.value, 'any-protocol');
+          assert.strictEqual(match?.result.pathname.groups.id, '456');
+        });
+
+        test('matches hostname-specific patterns', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              hostname: 'api.example.com',
+              pathname: '/data',
+            }),
+            'api-host',
+          );
+          list.addPattern(
+            new URLPattern({
+              hostname: 'cdn.example.com',
+              pathname: '/data',
+            }),
+            'cdn-host',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/data',
+            }),
+            'any-host',
+          );
+
+          let match = list.match('https://api.example.com/data');
+          assert.strictEqual(match?.value, 'api-host');
+
+          match = list.match('https://cdn.example.com/data');
+          assert.strictEqual(match?.value, 'cdn-host');
+
+          match = list.match('https://unknown.example.com/data');
+          assert.strictEqual(match?.value, 'any-host');
+        });
+
+        test('matches patterns with hostname parameters', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              hostname: ':subdomain.api.example.com',
+              pathname: '/service',
+            }),
+            'subdomain-api',
+          );
+          list.addPattern(
+            new URLPattern({
+              hostname: 'static.example.com',
+              pathname: '/service',
+            }),
+            'static-host',
+          );
+
+          let match = list.match('https://v1.api.example.com/service');
+          assert.strictEqual(match?.value, 'subdomain-api');
+          assert.strictEqual(match?.result.hostname.groups.subdomain, 'v1');
+
+          match = list.match('https://v2.api.example.com/service');
+          assert.strictEqual(match?.value, 'subdomain-api');
+          assert.strictEqual(match?.result.hostname.groups.subdomain, 'v2');
+
+          match = list.match('https://static.example.com/service');
+          assert.strictEqual(match?.value, 'static-host');
+        });
+
+        test('matches patterns with port specifications', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              hostname: 'localhost',
+              port: '3000',
+              pathname: '/api/:endpoint',
+            }),
+            'dev-server',
+          );
+          list.addPattern(
+            new URLPattern({
+              hostname: 'localhost',
+              port: ':port',
+              pathname: '/api/:endpoint',
+            }),
+            'any-port',
+          );
+
+          let match = list.match('http://localhost:3000/api/users');
+          assert.strictEqual(match?.value, 'dev-server');
+          assert.strictEqual(match?.result.pathname.groups.endpoint, 'users');
+
+          match = list.match('http://localhost:8080/api/posts');
+          assert.strictEqual(match?.value, 'any-port');
+          assert.strictEqual(match?.result.port.groups.port, '8080');
+          assert.strictEqual(match?.result.pathname.groups.endpoint, 'posts');
+        });
+
+        test('matches patterns with search parameters', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              pathname: '/search',
+              search: 'q=:query&type=product',
+            }),
+            'product-search',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/search',
+              search: 'q=:query&type=:type',
+            }),
+            'general-search',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/search',
+            }),
+            'any-search',
+          );
+
+          let match = list.match(
+            'https://example.com/search?q=laptop&type=product',
+          );
+          assert.strictEqual(match?.value, 'product-search');
+          assert.strictEqual(match?.result.search.groups.query, 'laptop');
+
+          match = list.match('https://example.com/search?q=book&type=media');
+          assert.strictEqual(match?.value, 'general-search');
+          assert.strictEqual(match?.result.search.groups.query, 'book');
+          assert.strictEqual(match?.result.search.groups.type, 'media');
+
+          match = list.match('https://example.com/search?page=1');
+          assert.strictEqual(match?.value, 'any-search');
+        });
+
+        test('matches patterns with hash fragments', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              pathname: '/docs/:page',
+              hash: 'section-:section',
+            }),
+            'docs-section',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/docs/:page',
+            }),
+            'docs-page',
+          );
+
+          let match = list.match('https://example.com/docs/api#section-auth');
+          assert.strictEqual(match?.value, 'docs-section');
+          assert.strictEqual(match?.result.pathname.groups.page, 'api');
+          assert.strictEqual(match?.result.hash.groups.section, 'auth');
+
+          match = list.match('https://example.com/docs/guide#overview');
+          assert.strictEqual(match?.value, 'docs-page');
+          assert.strictEqual(match?.result.pathname.groups.page, 'guide');
+        });
+
+        test('maintains first-match semantics with mixed specificity', () => {
+          const list = impl.create<string>();
+          // Add in order: specific → general → more specific
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.example.com',
+              pathname: '/v1/:resource',
+            }),
+            'first-specific',
+          );
+          list.addPattern(
+            new URLPattern({
+              pathname: '/v1/:resource',
+            }),
+            'general',
+          );
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.example.com',
+              pathname: '/v1/users',
+            }),
+            'more-specific',
+          );
+
+          // First matching pattern should win, even if a more specific pattern was added later
+          let match = list.match('https://api.example.com/v1/users');
+          assert.strictEqual(match?.value, 'first-specific');
+          assert.strictEqual(match?.result.pathname.groups.resource, 'users');
+
+          // General pattern should match other hosts
+          match = list.match('https://other.example.com/v1/posts');
+          assert.strictEqual(match?.value, 'general');
+          assert.strictEqual(match?.result.pathname.groups.resource, 'posts');
+        });
+
+        test('handles URL object input', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.example.com',
+              pathname: '/users/:id',
+            }),
+            'api-user',
+          );
+
+          const url = new URL('https://api.example.com/users/123');
+          const match = list.match(url.toString());
+          assert.strictEqual(match?.value, 'api-user');
+          assert.strictEqual(match?.result.pathname.groups.id, '123');
+        });
+
+        test('handles complex real-world patterns', () => {
+          const list = impl.create<string>();
+          // GitHub-like API patterns
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.github.com',
+              pathname: '/repos/:owner/:repo/issues/:number',
+            }),
+            'github-issue',
+          );
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.github.com',
+              pathname: '/repos/:owner/:repo/:endpoint*',
+            }),
+            'github-repo',
+          );
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: ':subdomain.github.com',
+              pathname: '/:path*',
+            }),
+            'github-subdomain',
+          );
+
+          let match = list.match(
+            'https://api.github.com/repos/microsoft/vscode/issues/123',
+          );
+          assert.strictEqual(match?.value, 'github-issue');
+          assert.strictEqual(match?.result.pathname.groups.owner, 'microsoft');
+          assert.strictEqual(match?.result.pathname.groups.repo, 'vscode');
+          assert.strictEqual(match?.result.pathname.groups.number, '123');
+
+          match = list.match(
+            'https://api.github.com/repos/microsoft/vscode/pulls',
+          );
+          assert.strictEqual(match?.value, 'github-repo');
+          assert.strictEqual(match?.result.pathname.groups.owner, 'microsoft');
+          assert.strictEqual(match?.result.pathname.groups.repo, 'vscode');
+
+          match = list.match('https://docs.github.com/en/api');
+          assert.strictEqual(match?.value, 'github-subdomain');
+          assert.strictEqual(match?.result.hostname.groups.subdomain, 'docs');
+        });
+
+        test('returns null when no patterns match', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'api.example.com',
+              pathname: '/users/:id',
+            }),
+            'api-user',
+          );
+
+          // Different protocol
+          let match = list.match('http://api.example.com/users/123');
+          assert.strictEqual(match, null);
+
+          // Different hostname
+          match = list.match('https://other.example.com/users/123');
+          assert.strictEqual(match, null);
+
+          // Different pathname
+          match = list.match('https://api.example.com/posts/123');
+          assert.strictEqual(match, null);
+        });
+
+        test('handles authentication URLs', () => {
+          const list = impl.create<string>();
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              username: ':user',
+              password: ':pass',
+              hostname: 'secure.example.com',
+              pathname: '/api/data',
+            }),
+            'authenticated-api',
+          );
+          list.addPattern(
+            new URLPattern({
+              protocol: 'https',
+              hostname: 'secure.example.com',
+              pathname: '/api/data',
+            }),
+            'public-api',
+          );
+
+          let match = list.match(
+            'https://admin:secret@secure.example.com/api/data',
+          );
+          assert.strictEqual(match?.value, 'authenticated-api');
+          assert.strictEqual(match?.result.username.groups.user, 'admin');
+          assert.strictEqual(match?.result.password.groups.pass, 'secret');
+
+          match = list.match('https://secure.example.com/api/data');
+          assert.strictEqual(match?.value, 'public-api');
+        });
       });
     });
   }

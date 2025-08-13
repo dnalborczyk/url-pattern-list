@@ -6,7 +6,7 @@ optimized prefix tree data structure.
 ## Overview
 
 `url-pattern-list` is a JavaScript library that provides an optimized way to
-match URL paths against multiple
+match URLs against multiple
 [URLPattern](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern)
 instances. Instead of matching URLs by linearly testing URLs against a list of
 patterns, `URLPatternList` uses a prefix tree to share common pattern prefixes
@@ -15,7 +15,7 @@ and reduce the number of checks that need to be performed to find a match.
 `URLPatternList` has the same matching semantics as scanning a linear list of
 patterns, and it tested against such a linear list to ensure correctness. The
 first `URLPattern` (in the order patterns were added to the list) that matches a
-path is returned as the match.
+URL is returned as the match.
 
 Patterns are added to the list along with an additional value that is returned
 with the match. This makes it easy to associate a URLPattern with metadata or an
@@ -48,23 +48,35 @@ if (match) {
 }
 ```
 
-## Limitations
-
-`URLPatternList` currently only supports matching URL pathnames. In the future
-it may support matching other URL parts.
-
 ## Performance
 
 Benchmarks show that the prefix tree-based URLPatternList is significantly
-faster than linear scanning. The optimized version is roughly 3x faster to match
-for small (10) sets of patterns, and up to 25-30x faster for large (2000) sets
-of patterns.
+faster than linear scanning. The optimized version is 2-3x faster to match for
+small (10) sets of patterns, and up to 20-30x faster for large (2000) sets of
+patterns.
 
 To run the benchmark on your machine:
 
 ```sh
 npm run benchmark
 ```
+
+### Prefix Tree Optimization for All URL Components
+
+URLPatternList builds prefix trees not just for pathname components, but for all
+URL components including search parameters and hash fragments. To enable prefix
+sharing across all components, the parser splits fixed text by `/` even in
+search and hash components.
+
+This design choice optimizes for common real-world patterns where path-like
+structures appear in search parameters (e.g., `?path=/api/users/123`) and hash
+fragments (e.g., `#/admin/dashboard/settings`). By splitting these components
+by `/`, the prefix tree can share common prefixes like `/api` or `/admin`
+across different patterns, leading to better performance.
+
+While this means search/hash patterns like `path=/admin/users` are stored as
+multiple tree nodes rather than a single node, the prefix sharing benefits
+typically outweigh this cost in realistic usage scenarios.
 
 ## API Reference
 
@@ -87,9 +99,9 @@ const list = new URLPatternList<RouteHandler>();
 list.addPattern(new URLPattern({pathname: '/users/:id'}), handleUserDetail);
 ```
 
-##### `match(path: string, baseUrl?: string): URLPatternListMatch<T> | null`
+##### `match(url: string | URL, baseUrl?: string): URLPatternListMatch<T> | null`
 
-Match a path against all patterns, returning the first match found.
+Match a URL against all patterns, returning the first match found.
 
 ```typescript
 const match = list.match('/users/123', 'https://example.com');

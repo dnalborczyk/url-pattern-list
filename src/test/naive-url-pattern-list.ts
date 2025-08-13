@@ -11,11 +11,16 @@
  */
 import type {URLPatternListItem, URLPatternListMatch} from '../index.js';
 
+export interface URLPatternListLike<T> {
+  addPattern(pattern: URLPattern, value: T): void;
+  match(url: string, baseUrl?: string): URLPatternListMatch<T> | null;
+}
+
 /**
  * A naive implementation of URLPatternList that uses linear search.
  * This serves as a reference implementation to test against the optimized version.
  */
-export class NaiveURLPatternList<T> {
+export class NaiveURLPatternList<T> implements URLPatternListLike<T> {
   #patterns: URLPatternListItem<T>[] = [];
 
   /**
@@ -29,10 +34,15 @@ export class NaiveURLPatternList<T> {
    * Match a path against the patterns using linear search.
    * Returns the first pattern that matches (preserving order).
    */
-  match(path: string, baseUrl?: string): URLPatternListMatch<T> | null {
+  match(url: string, baseUrl?: string): URLPatternListMatch<T> | null {
     for (const item of this.#patterns) {
-      if (item.pattern.test(path, baseUrl)) {
-        const result = item.pattern.exec(path, baseUrl);
+      const matches = baseUrl
+        ? item.pattern.test(url, baseUrl)
+        : item.pattern.test(url);
+      if (matches) {
+        const result = baseUrl
+          ? item.pattern.exec(url, baseUrl)
+          : item.pattern.exec(url);
         if (result !== null) {
           return {result, value: item.value};
         }

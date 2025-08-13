@@ -14,6 +14,19 @@ export const PartType = {
 } as const;
 export type PartType = (typeof PartType)[keyof typeof PartType];
 
+export const URLComponentType = {
+  Protocol: 0,
+  Username: 1,
+  Password: 2,
+  Hostname: 3,
+  Port: 4,
+  Pathname: 5,
+  Search: 6,
+  Hash: 7,
+} as const;
+export type URLComponentType =
+  (typeof URLComponentType)[keyof typeof URLComponentType];
+
 export interface Part {
   type: PartType;
   name: string | number | undefined;
@@ -21,6 +34,7 @@ export interface Part {
   value: string;
   suffix: string;
   modifier: Modifier;
+  urlComponentType: URLComponentType;
 }
 
 // See https://tc39.es/ecma262/#prod-IdentifierStart for why we need `$` and `_`
@@ -41,6 +55,7 @@ const onlyASCII = /^[\x00-\x7F]*$/;
 class Parser {
   #path: string;
   #result: Array<Part> = [];
+  #urlComponentType: URLComponentType;
 
   /**
    * Set of used names to ensure uniqueness of parameter names.
@@ -64,8 +79,12 @@ class Parser {
    */
   #i = 0;
 
-  constructor(path: string) {
+  constructor(
+    path: string,
+    urlComponentType: URLComponentType = URLComponentType.Pathname,
+  ) {
     this.#path = path;
+    this.#urlComponentType = urlComponentType;
   }
 
   /**
@@ -85,6 +104,7 @@ class Parser {
         value: '/',
         suffix: '',
         modifier: Modifier.None,
+        urlComponentType: this.#urlComponentType,
       });
       this.#pendingFixedValue = '';
       return;
@@ -110,6 +130,7 @@ class Parser {
             value: '/' + segment,
             suffix: '',
             modifier: Modifier.None,
+            urlComponentType: this.#urlComponentType,
           });
         }
       }
@@ -126,6 +147,7 @@ class Parser {
           value: '/',
           suffix: '',
           modifier: Modifier.None,
+          urlComponentType: this.#urlComponentType,
         });
       }
     } else {
@@ -142,6 +164,7 @@ class Parser {
             value: segmentValue,
             suffix: '',
             modifier: Modifier.None,
+            urlComponentType: this.#urlComponentType,
           });
         }
       }
@@ -172,6 +195,7 @@ class Parser {
       value,
       suffix,
       modifier,
+      urlComponentType: this.#urlComponentType,
     });
   }
 
@@ -477,12 +501,54 @@ class Parser {
 }
 
 /**
- * Parse a path pattern into an array of Part objects.
+ * Parse a pattern string into an array of Part objects.
  *
- * @param path - The path pattern to parse (e.g., "/users/:id" or "/files/*")
- * @returns Array of Part objects representing each segment of the path
+ * @param pattern - The pattern to parse (e.g., "/users/:id" or "https" or "*")
+ * @param urlComponentType - The URL component this pattern represents
+ * @returns Array of Part objects representing each segment of the pattern
  */
-export const parse = (path: string): Array<Part> => {
-  const parser = new Parser(path);
+export const parse = (
+  pattern: string,
+  urlComponentType: URLComponentType = URLComponentType.Pathname,
+): Array<Part> => {
+  const parser = new Parser(pattern, urlComponentType);
   return parser.parse();
+};
+
+/**
+ * Parse a full URLPattern into an array of Part objects covering all URL components.
+ *
+ * @param pattern - The URLPattern to parse
+ * @returns Array of Part objects representing all components of the URL pattern
+ */
+export const parseFullURL = (pattern: URLPattern): Array<Part> => {
+  const parts: Array<Part> = [];
+
+  // Parse each URL component in order, skipping wildcards
+  if (pattern.protocol !== '*') {
+    parts.push(...parse(pattern.protocol, URLComponentType.Protocol));
+  }
+  if (pattern.username !== '*') {
+    parts.push(...parse(pattern.username, URLComponentType.Username));
+  }
+  if (pattern.password !== '*') {
+    parts.push(...parse(pattern.password, URLComponentType.Password));
+  }
+  if (pattern.hostname !== '*') {
+    parts.push(...parse(pattern.hostname, URLComponentType.Hostname));
+  }
+  if (pattern.port !== '*') {
+    parts.push(...parse(pattern.port, URLComponentType.Port));
+  }
+  if (pattern.pathname !== '*') {
+    parts.push(...parse(pattern.pathname, URLComponentType.Pathname));
+  }
+  if (pattern.search !== '*') {
+    parts.push(...parse(pattern.search, URLComponentType.Search));
+  }
+  if (pattern.hash !== '*') {
+    parts.push(...parse(pattern.hash, URLComponentType.Hash));
+  }
+
+  return parts;
 };

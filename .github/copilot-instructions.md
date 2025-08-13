@@ -24,22 +24,17 @@ well enough, and prefix-tree (trie) based search can be much faster.
 `URLPatternList` has two main APIs:
 - `addPattern(pattern)` which adds a new pattern to the list and updates the
   internal prefix tree.
-- `match(pathname, baseUrl)` which searches the prefix tree for a match.
+- `match(url, baseUrl)` which searches the prefix tree for a match.
 
 Patterns cannot currently be removed or inserted into the middle of the list.
 This may be an important feature to add in the future.
 
 ## Architecture
 
-Currently, `URLPatternList` builds a prefix-tree only for the `pathname` part of
-`URLPattern`, and so only supports pathnames passed to `match()`. It's a future
-goal to support full URLPattern matching, as optimized as possible.
-
 ### Parsing
 
-`src/lib/parse-pattern.ts` contains the `parse()` function which parses the
-pathname part of a `URLPattern` into an array of `Parts`. The Part types
-include:
+`src/lib/parse-pattern.ts` contains the `parse()` function which parses a
+`URLPattern` into an array of `Parts`. The Part types include:
 - Fixed: A fixed string, like `/api`.
 - SegmentWildcard: A named parameter like `/:id`
 - FullWildcard: A `*` wildcard
@@ -47,10 +42,18 @@ include:
 
 These parsed parts correspond to the types of prefix tree nodes as well. Fixed
 parts are split by path separators (`/`) to make construction of the tree
-simpler. Instead of building a radix-tree that sometimes needs to split nodes
-when new nodes are added, we always make a path segment a separate node, and
-never subdivide segments, so we only have to append to the tree. One of the
-goals of this approach is to make it less costly to add patterns.
+simpler. **This splitting happens for all URL components, not just pathnames.**
+
+The decision to split by `/` in search and hash components is intentional and
+optimizes for common real-world patterns where path-like structures appear in
+these components (e.g., `?path=/api/users` or `#/admin/dashboard`). This allows
+the prefix tree to share common prefixes like `/api` even within search
+parameters and hash fragments, improving performance.
+
+Instead of building a radix-tree that sometimes needs to split nodes when new
+nodes are added, we always make a path segment a separate node, and never
+subdivide segments, so we only have to append to the tree. One of the goals of
+this approach is to make it less costly to add patterns.
 
 ### Tree Construction
 
@@ -97,17 +100,21 @@ number of any pattern stored in its subtree. This number is updated any time a
 new pattern is added to a node's subtree. It's used to make the first-match
 behavior efficient.
 
-### Pathname Matching
+### URL Matching
 
-Matching against a pathname is done by calling `match()` on the root node, which
+Matching against a URL is done by calling `match()` on the root node, which
 recursively calls `match()` on the subtrees.
 
+`match()` is called with an array of `URLComponent`s. The given URL transformed
+into this array so we can match it against the prefix tree from left-most
+component (protocol) to right-most (hash) by incrementing an array index.
+
 `match()` is implemented by each tree node implementation. It first checks for a
-match at that node, A fixed tree node checks if the pathname at the current
+match at that node, A fixed tree node checks if the URL at the current
 position starts with the node value, etc. If a node doesn't match, it's subtree
 is not visited and the node's successor is checked. If a node does match, then
 its patterns and children are checked. A node's patterns are only checked if the
-entire pathname string has been consumed, indicating that we should have found a
+entire URL string has been consumed, indicating that we should have found a
 pattern match. A node's children are checked after that.
 
 In order to implement first-match semantics, tree node children are sometimes
@@ -151,6 +158,7 @@ do need to run the build first if the implementation has changed.
 ## Code Style
 
 - Use very modern TypeScript: TypeScript 5.9 and JavaScript ES2024
+- Always use ESM module syntax and never CommonJS
 - Indent code 2 spaces
 - Wrap code and comments at 80 columns
 - Use arrow functions instead of the `function` keyword
