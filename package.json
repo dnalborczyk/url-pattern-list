@@ -34,6 +34,19 @@
     "typescript": "^5.9.2",
     "wireit": "^0.14.12"
   },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "index.js.map",
+    "index.d.ts.map",
+    "lib"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
   "wireit": {
     "build": {
       "command": "tsc --build",
